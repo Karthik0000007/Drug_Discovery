@@ -1,53 +1,44 @@
+import json
+import pickle
+import numpy as np
 import pandas as pd
+import os
 
-# Load raw file
-raw_file = 'data\davis.csv'  # your file
-data = []
+def convert_deepdta_format(dataset: str, data_dir: str, out_path: str, log_transform: bool = True):
+    """Convert DeepDTA JSON + matrix format to flat CSV."""
+    with open(os.path.join(data_dir, 'ligands_can.txt')) as f:
+        drugs = json.load(f)          # {drug_name: smiles}
+    with open(os.path.join(data_dir, 'proteins.txt')) as f:
+        proteins = json.load(f)       # {target_name: sequence}
 
-with open(raw_file, 'r') as f:
-    for line in f:
-        parts = line.strip().split(' ')
-        drug_id = parts[0]
-        target_id = parts[1]
-        smiles = parts[2]
-        sequence = parts[3]
-        # If the sequence has spaces in it, combine everything except first 3 and last element
-        if len(parts) > 5:
-            sequence = ' '.join(parts[3:-1])
-        affinity = float(parts[-1])
-        data.append([drug_id, target_id, smiles, sequence, affinity])
+    # Y is a Python-2-pickled numpy array; requires latin1 encoding in Python 3
+    with open(os.path.join(data_dir, 'Y'), 'rb') as f:
+        Y = pickle.load(f, encoding='latin1')
+    Y = np.array(Y, dtype=float)
 
-# Convert to DataFrame
-df = pd.DataFrame(data, columns=['drug_id', 'target_id', 'smiles', 'sequence', 'affinity'])
+    drug_names = list(drugs.keys())
+    prot_names = list(proteins.keys())
 
-# Save to CSV
-df.to_csv('data\davis_processed.csv', index=False)
-print("Saved processed Davis dataset as davis_processed.csv")
+    rows = []
+    for i, d in enumerate(drug_names):
+        for j, p in enumerate(prot_names):
+            aff = Y[i, j]
+            if np.isnan(aff):
+                continue
+            if log_transform and dataset == 'davis':
+                # Convert Kd (nM) → pKd
+                aff = -np.log10(aff / 1e9)
+            rows.append({
+                'drug_id':  d,
+                'target_id': p,
+                'smiles':   drugs[d],
+                'sequence': proteins[p],
+                'affinity': aff
+            })
 
-import pandas as pd
+    df = pd.DataFrame(rows)
+    df.to_csv(out_path, index=False)
+    print(f"Saved {len(df)} pairs to {out_path}")
 
-# Load raw KIBA file
-raw_file = 'data\kiba.csv'  # your file path
-data = []
-
-with open(raw_file, 'r') as f:
-    for line in f:
-        parts = line.strip().split(' ')
-        drug_id = parts[0]
-        target_id = parts[1]
-        smiles = parts[2]
-        sequence = parts[3]
-        # Combine if sequence has spaces
-        if len(parts) > 5:
-            sequence = ' '.join(parts[3:-1])
-        affinity = float(parts[-1])
-        data.append([drug_id, target_id, smiles, sequence, affinity])
-
-# Convert to DataFrame
-df = pd.DataFrame(data, columns=['drug_id', 'target_id', 'smiles', 'sequence', 'affinity'])
-
-# Save processed CSV
-df.to_csv('data\kiba_processed.csv', index=False)
-print("Saved processed KIBA dataset as kiba_processed.csv")
-
-
+convert_deepdta_format('davis', 'data/davis/', 'data/davis_processed.csv')
+convert_deepdta_format('kiba',  'data/kiba/',  'data/kiba_processed.csv', log_transform=False)
