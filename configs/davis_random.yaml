@@ -1,0 +1,46 @@
+# CL-DTA Configuration — DAVIS Random Split
+data:
+  dataset: davis
+  data_path: data/davis_processed.csv
+  split: random
+  test_frac: 0.1
+  val_frac: 0.1
+  max_sml_len: 100
+  max_prot_len: 1000
+
+pretrain:
+  mode: both_independent
+  epochs: 100
+  batch_size: 256
+  lr: 0.0005
+  temperature: 0.07
+  projection_dim: 64
+  drug_augmentations:
+    - smiles_enumeration
+    - atom_masking
+    - substructure_dropout
+  prot_augmentations:
+    - subsequence_crop
+    - residue_masking
+    - residue_substitution
+  loss: nt_xent
+  checkpoint_dir: checkpoints/davis_random
+
+train:
+  epochs: 30
+  batch_size: 128
+  lr: 0.0001
+  weight_decay: 0.00001
+  patience: 8
+  grad_clip: 5.0
+  freeze_strategy: full_finetune
+  unfreeze_after: 5
+
+experiment:
+  name: davis_random
+  seeds:
+    - 42
+    - 123
+    - 456
+  output_dir: results/davis_random
+  device: auto
