@@ -70,13 +70,13 @@ The core hypothesis: **Cross-modal contrastive pretraining + pretrained biologic
 ```mermaid
 flowchart TB
     subgraph DataLayer ["Data Layer"]
-        RAW[Raw Datasets<br/>DAVIS · KIBA]
-        PREP[Preprocessing<br/>preprocess.py]
-        CSV[Processed CSVs<br/>drug_id · target_id · smiles · sequence · affinity]
+        RAW[Raw Datasets\nDAVIS · KIBA]
+        PREP[Preprocessing\npreprocess.py]
+        CSV[Processed CSVs\ndrug_id · target_id · smiles · sequence · affinity]
     end
 
     subgraph SplitLayer ["Split Layer"]
-        SPLIT[Data Splitter<br/>data_loading.py]
+        SPLIT[Data Splitter\ndata_loading.py]
         RAND[Random Split]
         CD[Cold-Drug Split]
         CT[Cold-Target Split]
@@ -84,35 +84,35 @@ flowchart TB
     end
 
     subgraph PretrainPhase ["Phase 1 — Contrastive Pretraining"]
-        AUG_D[Drug Augmentations<br/>SMILES Enumeration<br/>Atom Masking<br/>Substructure Dropout]
-        AUG_P[Protein Augmentations<br/>Subsequence Cropping<br/>Residue Masking<br/>Residue Substitution]
-        CDSET[ContrastiveDataset<br/>Positive Pair Generation]
-        DRUG_ENC[Drug CNN Encoder<br/>3×Conv1D + AdaptiveMaxPool]
-        PROT_ENC[Protein CNN Encoder<br/>3×Conv1D + AdaptiveMaxPool]
-        PROJ_D[Drug Projection Head<br/>MLP → ℓ₂-normalize]
-        PROJ_P[Protein Projection Head<br/>MLP → ℓ₂-normalize]
-        LOSS_CL[NT-Xent / InfoNCE<br/>Contrastive Loss]
-        CROSS[Cross-Modal<br/>Alignment Loss<br/>(Optional)]
+        AUG_D[Drug Augmentations\nSMILES Enumeration\nAtom Masking\nSubstructure Dropout]
+        AUG_P[Protein Augmentations\nSubsequence Cropping\nResidue Masking\nResidue Substitution]
+        CDSET[ContrastiveDataset\nPositive Pair Generation]
+        DRUG_ENC[Drug CNN Encoder\n3×Conv1D + AdaptiveMaxPool]
+        PROT_ENC[Protein CNN Encoder\n3×Conv1D + AdaptiveMaxPool]
+        PROJ_D[Drug Projection Head\nMLP → ℓ₂-normalize]
+        PROJ_P[Protein Projection Head\nMLP → ℓ₂-normalize]
+        LOSS_CL[NT-Xent / InfoNCE\nContrastive Loss]
+        CROSS[Cross-Modal\nAlignment Loss\n(Optional)]
     end
 
     subgraph FinetunePhase ["Phase 2 — Supervised Fine-Tuning"]
-        LOAD[Load Pretrained<br/>Encoder Weights]
-        DTA_MODEL[DeepDTA Model<br/>Drug CNN + Protein CNN + FC Head]
+        LOAD[Load Pretrained\nEncoder Weights]
+        DTA_MODEL[DeepDTA Model\nDrug CNN + Protein CNN + FC Head]
         MSE_LOSS[MSE Regression Loss]
-        EVAL[Evaluation<br/>MSE · CI · Pearson · Spearman · r²ₘ]
+        EVAL[Evaluation\nMSE · CI · Pearson · Spearman · r²ₘ]
     end
 
     subgraph Baselines ["Baseline Models"]
-        GDTA[GraphDTA<br/>GCN/GAT + CNN]
-        WDTA[WideDTA<br/>LMCS + Motif Words]
-        ADTA[AttentionDTA<br/>Self-Attention + CNN]
-        DDTA[DeepDTA<br/>CNN Baseline]
+        GDTA[GraphDTA\nGCN/GAT + CNN]
+        WDTA[WideDTA\nLMCS + Motif Words]
+        ADTA[AttentionDTA\nSelf-Attention + CNN]
+        DDTA[DeepDTA\nCNN Baseline]
     end
 
     subgraph Output ["Output Layer"]
-        RES[Results<br/>JSON · CSV · TensorBoard]
-        VIZ[Visualizations<br/>t-SNE · Bar Charts · Heatmaps]
-        PAPER[Paper Artifacts<br/>Tables · Figures]
+        RES[Results\nJSON · CSV · TensorBoard]
+        VIZ[Visualizations\nt-SNE · Bar Charts · Heatmaps]
+        PAPER[Paper Artifacts\nTables · Figures]
     end
 
     RAW --> PREP --> CSV
@@ -816,7 +816,7 @@ sequenceDiagram
     participant LOAD as Weight Loader
     participant MODEL as DeepDTA Model
     participant DATA as DataLoader
-    participant OPT as Optimizer
+    participant OPTIM as Optimizer
     participant EVAL as Evaluator
     participant TB as TensorBoard
     participant CKPT as Checkpoint
@@ -825,14 +825,14 @@ sequenceDiagram
     LOAD->>MODEL: Load pretrained encoder weights
     LOAD->>MODEL: Reinitialize FC head (random)
 
-    Note over MODEL: Freeze strategy applied<br/>(frozen / full_finetune / gradual_unfreeze)
+    Note over MODEL: Freeze strategy applied\n(frozen / full_finetune / gradual_unfreeze)
 
     loop Each Epoch (1..30)
         loop Each Minibatch
             DATA->>MODEL: smiles_tokens, seq_tokens, affinity
             MODEL->>MODEL: Forward: encode → concat → FC → predict
-            MODEL->>OPT: MSE loss backward
-            OPT->>MODEL: AdamW step + grad clip (5.0)
+            MODEL->>OPTIM: MSE loss backward
+            OPTIM->>MODEL: AdamW step + grad clip (5.0)
         end
 
         MODEL->>EVAL: Evaluate on val_loader
@@ -847,7 +847,7 @@ sequenceDiagram
 
     CKPT->>MODEL: Load best checkpoint
     MODEL->>EVAL: Final evaluation on test set
-    EVAL-->>TB: Log test metrics (MSE, CI, Pearson, Spearman, r²ₘ)
+    EVAL-->>TB: Log test metrics (MSE, CI, Pearson, Spearman, r2m)
     EVAL->>CKPT: Save ExperimentResult JSON
 ```
 
@@ -1307,29 +1307,29 @@ The system is designed around a single principle: **cold-start generalization re
 
 ```mermaid
 flowchart TD
-    A[Raw Data File] -->|Missing columns| B[⚠ ValueError: required column missing]
+    A[Raw Data File] -->|Missing columns| B[ValueError required column missing]
     A -->|Malformed SMILES| C[RDKit returns None]
     C --> D[Row dropped with warning]
     
-    E[SMILES Augmentation] -->|RDKit MolFromSmiles fails| F[Retry up to 5×]
+    E[SMILES Augmentation] -->|RDKit MolFromSmiles fails| F[Retry up to 5x]
     F -->|All retries fail| G[Return original SMILES]
     
-    H[Cold-Both Split] -->|Too few entities| I[⚠ Empty test set]
-    I --> J[Reduce test_frac or switch to cold_drug/cold_target]
+    H[Cold-Both Split] -->|Too few entities| I[Empty test set]
+    I --> J[Reduce test_frac or switch split]
     
-    K[Contrastive Pretraining] -->|Temperature too low| L[Loss becomes NaN<br/>numerical overflow in exp()]
-    K -->|Batch too small| M[Too few negatives<br/>contrastive signal degrades]
+    K[Contrastive Pretraining] -->|Temperature too low| L[Loss becomes NaN\nNumerical overflow in exp]
+    K -->|Batch too small| M[Too few negatives\nContrastive signal degrades]
     
     N[Vocabulary Build] -->|Test has unseen chars| O[Map to UNK index]
     
     P[Model Training] -->|Gradient explosion| Q[Grad clip at 5.0]
-    P -->|Overfitting detected| R[Early stopping at patience=8]
-    P -->|CUDA OOM| S[⚠ Reduce batch size]
+    P -->|Overfitting detected| R[Early stopping patience 8]
+    P -->|CUDA OOM| S[Reduce batch size]
     
     T[GraphDTA Baseline] -->|RDKit mol graph fails| U[Skip sample with warning]
     
-    V[Metric Computation] -->|CI on large set| W[Use sampled CI (m=100K pairs)]
-    V -->|All predictions identical| X[CI = 0.5, Pearson = 0.0]
+    V[Metric Computation] -->|CI on large set| W[Use sampled CI m=100K pairs]
+    V -->|All predictions identical| X[CI 0.5 Pearson 0.0]
 
     style B fill:#e74c3c,color:#fff
     style I fill:#e74c3c,color:#fff
@@ -1687,7 +1687,7 @@ Discuss biological plausibility: Why does the pretrained representation capture 
 
 ### Prerequisites
 
-- **GPU:** NVIDIA GPU with ≥ 8 GB VRAM (RTX 3060 or better recommended)
+- **GPU:** NVIDIA GPU with ≥ 4 GB VRAM (RTX 3060 or better recommended)
 - **Driver:** NVIDIA Driver supporting CUDA 11.8+
 - **OS:** Linux (Ubuntu 20.04+) or Windows 10/11
 - **Python:** 3.10+
@@ -3683,7 +3683,13 @@ where $M$ is the number of known pairs in the batch and $B_p$ is the total numbe
 
 ### Concordance Index
 
-$$\text{CI} = \frac{\sum_{i<j} h(\hat{y}_i, \hat{y}_j, y_i, y_j)}{|\{(i,j) : y_i \neq y_j, i < j\}|}$$
+$$
+\text{CI} = \frac{
+\sum_{i<j} h(\hat{y}_i, \hat{y}_j, y_i, y_j)
+}{
+\left| \{ (i,j) : y_i \neq y_j,\ i < j \} \right|
+}
+$$
 
 where:
 
