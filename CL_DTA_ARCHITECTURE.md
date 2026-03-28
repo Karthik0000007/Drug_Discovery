@@ -1,29 +1,36 @@
-# CL-DTA: Contrastive Self-Supervised Learning for Cold-Start Drug–Target Affinity Prediction — Technical Documentation
+# CL-DTA++: Advanced Contrastive Self-Supervised Learning for Cold-Start Drug–Target Affinity Prediction — Technical Documentation
 
-> **Version:** 1.0  
-> **Last updated:** 2026-03-01  
-> **Language / Runtime:** Python 3.10+ · PyTorch 2.x · RDKit 2023.x · scikit-learn 1.3+ · TensorBoard 2.x  
-> **Architecture style:** Two-phase contrastive pretraining → supervised fine-tuning pipeline for regression-based drug–target binding affinity prediction  
+> **Version:** 2.0 (Enhanced)
+> **Last updated:** 2026-03-26
+> **Language / Runtime:** Python 3.10+ · PyTorch 2.x · RDKit 2023.x · scikit-learn 1.3+ · TensorBoard 2.x · Hugging Face Transformers 4.x
+> **Architecture style:** Cross-modal contrastive pretraining with pretrained LLMs → meta-learning → uncertainty-aware supervised fine-tuning pipeline for drug–target binding affinity prediction with interpretability and multi-task support  
 
 ---
 
 ## Table of Contents
 
-1. [System Overview](#1-system-overview)  
-2. [Architecture Breakdown](#2-architecture-breakdown)  
-3. [Domain Model](#3-domain-model)  
-4. [Execution Flow](#4-execution-flow)  
-5. [Contrastive Pretraining — Theory & Design](#5-contrastive-pretraining--theory--design)  
-6. [Augmentation Engine](#6-augmentation-engine)  
-7. [Evaluation Protocol — Cold-Start Splits](#7-evaluation-protocol--cold-start-splits)  
-8. [Key Design Decisions](#8-key-design-decisions)  
-9. [Failure & Edge Case Analysis](#9-failure--edge-case-analysis)  
-10. [Training & Evaluation Pipeline](#10-training--evaluation-pipeline)  
-11. [Baseline Models](#11-baseline-models)  
-12. [Ablation Studies](#12-ablation-studies)  
-13. [Visualization & Analysis](#13-visualization--analysis)  
-14. [Developer Onboarding Guide](#14-developer-onboarding-guide)  
-15. [Suggested Improvements](#15-suggested-improvements)  
+1. [System Overview](#1-system-overview)
+2. [Architecture Breakdown](#2-architecture-breakdown)
+3. [Domain Model](#3-domain-model)
+4. [Execution Flow](#4-execution-flow)
+5. [Cross-Modal Contrastive Pretraining — Theory & Design](#5-cross-modal-contrastive-pretraining--theory--design)
+6. [Augmentation Engine](#6-augmentation-engine)
+7. [Evaluation Protocol — Cold-Start Splits & Leakage Verification](#7-evaluation-protocol--cold-start-splits--leakage-verification)
+8. [Large-Scale Datasets — BindingDB & Pharos Dark Proteins](#8-large-scale-datasets--bindingdb--pharos-dark-proteins)
+9. [Pretrained LLM Integration — ESM & ChemBERTa](#9-pretrained-llm-integration--esm--chemberta)
+10. [Meta-Learning for Few-Shot Adaptation](#10-meta-learning-for-few-shot-adaptation)
+11. [Pocket-Guided Attention Mechanism](#11-pocket-guided-attention-mechanism)
+12. [Uncertainty Estimation — Evidential Regression](#12-uncertainty-estimation--evidential-regression)
+13. [Multi-Task Learning Framework](#13-multi-task-learning-framework)
+14. [Interpretability & Theoretical Analysis](#14-interpretability--theoretical-analysis)
+15. [Key Design Decisions](#15-key-design-decisions)
+16. [Failure & Edge Case Analysis](#16-failure--edge-case-analysis)
+17. [Training & Evaluation Pipeline](#17-training--evaluation-pipeline)
+18. [Baseline Models & SOTA Comparisons](#18-baseline-models--sota-comparisons)
+19. [Comprehensive Ablation Framework](#19-comprehensive-ablation-framework)
+20. [Statistical Rigor & Reproducibility](#20-statistical-rigor--reproducibility)
+21. [Developer Onboarding Guide](#21-developer-onboarding-guide)
+22. [Implementation Roadmap](#22-implementation-roadmap)  
 
 ---
 
@@ -31,12 +38,32 @@
 
 ### Purpose
 
-This system is a **research-grade drug–target binding affinity (DTA) prediction framework** designed to address the **cold-start problem** — predicting affinity for entirely unseen drugs and/or protein targets at test time. Unlike conventional DTA models that train purely supervised and suffer large performance drops under cold splits, CL-DTA introduces a **two-phase training paradigm**:
+This system is an **advanced research-grade drug–target binding affinity (DTA) prediction framework** designed to address the **cold-start problem** — predicting affinity for entirely unseen drugs and/or protein targets at test time. CL-DTA++ extends the original CL-DTA architecture with state-of-the-art techniques to achieve publication-quality novelty suitable for top-tier venues.
 
-1. **Phase 1 — Contrastive Pretraining:** Drug SMILES encoders and protein sequence encoders are independently pretrained using augmentation-based contrastive learning (NT-Xent loss). Domain-specific augmentations (SMILES enumeration, atom masking, subsequence cropping, residue substitution) force encoders to learn augmentation-invariant, structurally meaningful representations.
-2. **Phase 2 — Supervised Fine-Tuning:** Pretrained encoder weights are loaded into the DeepDTA architecture and fine-tuned end-to-end with MSE regression loss on drug–target affinity labels.
+### Core Innovation & Training Paradigm
 
-The core innovation is the **hypothesis that contrastive pretraining produces representations that generalize better to unseen chemical/biological entities**, measured across four split protocols (random, cold-drug, cold-target, cold-both) on two standard benchmarks (DAVIS, KIBA).
+CL-DTA++ implements a **multi-phase training pipeline** combining:
+
+1. **Phase 1 — Cross-Modal Contrastive Pretraining (Default):**
+   - **Intra-modal learning:** Drug–drug and protein–protein contrastive learning via NT-Xent loss
+   - **Cross-modal alignment:** Drug–protein binding pair alignment loss to learn joint representations
+   - **Pretrained LLM initialization:** ESM (protein) and ChemBERTa (drug) encoders with projection layers
+   - **Alignment loss:** Consistency regularization between LLM embeddings and learned representations
+   - **Scale:** Trained on large-scale BindingDB (~millions of samples) plus DAVIS/KIBA
+
+2. **Phase 2 — Meta-Learning (MAML-style):**
+   - Few-shot adaptation framework for rapid generalization to unseen entities
+   - Inner loop: Task-specific adaptation on support sets (1–10 shots)
+   - Outer loop: Meta-update for cross-task generalization
+   - Enables adaptation to cold-drug, cold-target, and cold-both scenarios
+
+3. **Phase 3 — Uncertainty-Aware Supervised Fine-Tuning:**
+   - **Multi-task head:** Simultaneous prediction of affinity (regression), binary interaction (classification), and mechanism of action (MoA)
+   - **Evidential uncertainty estimation:** Outputs prediction intervals and confidence scores
+   - **Pocket-guided attention:** Cross-attention mechanism focusing on binding-relevant protein regions
+   - **Calibrated predictions:** Expected Calibration Error (ECE) tracking for reliability
+
+The core hypothesis: **Cross-modal contrastive pretraining + pretrained biological/chemical LLMs + meta-learning + uncertainty quantification produces representations that generalize significantly better to unseen entities**, validated across five split protocols (random, cold-drug, cold-target, cold-both, cold-pharos) on DAVIS, KIBA, and BindingDB/Pharos benchmarks.
 
 ### High-Level Architecture
 
@@ -359,34 +386,96 @@ Orchestrates the pretraining phase with three modes:
 
 #### Configuration System (`config.py`)
 
-Dataclass-based hierarchical configuration, replacing scattered argparse defaults. Supports YAML loading for reproducible experiment configs.
+Dataclass-based hierarchical configuration, replacing scattered argparse defaults. Supports YAML loading for reproducible experiment configs. **Enhanced for CL-DTA++ with all Phase 1-11 features.**
 
 ```python
 @dataclass
 class DataConfig:
-    dataset: str = 'davis'             # 'davis' | 'kiba'
+    dataset: str = 'davis'             # 'davis' | 'kiba' | 'bindingdb' | 'pharos'
     data_path: str = 'data/'
     max_sml_len: int = 120
     max_prot_len: int = 1000
-    split: str = 'random'             # 'random' | 'cold_drug' | 'cold_target' | 'cold_both'
+    split: str = 'random'             # 'random' | 'cold_drug' | 'cold_target' | 'cold_both' | 'cold_pharos'
     test_frac: float = 0.1
     val_frac: float = 0.1
-    n_folds: int = 5                   # For k-fold CV on cold splits
+    n_folds: int = 5                   # For k-fold entity-group CV on cold splits
+    verify_no_leakage: bool = True     # Programmatic leakage verification (Phase 2)
+    use_cached_dataset: bool = True    # Use preprocessed .pt files for large datasets (Phase 3)
+    min_samples_threshold: int = 100   # Minimum samples per split
+    max_retry_attempts: int = 5        # Retry split if constraints violated
 
 @dataclass
 class PretrainConfig:
     enabled: bool = True
-    mode: str = 'both_independent'    # 'drug_only' | 'prot_only' | 'both_independent' | 'cross_modal'
+    mode: str = 'cross_modal'         # 'drug_only' | 'prot_only' | 'both_independent' | 'cross_modal' (Phase 1)
     epochs: int = 100
     batch_size: int = 256
     lr: float = 5e-4
     temperature: float = 0.07
     loss: str = 'nt_xent'             # 'nt_xent' | 'infonce' | 'triplet'
+
+    # Cross-modal alignment (Phase 1)
+    use_cross_modal: bool = True
+    align_loss_weight: float = 0.5    # Weight for cross-modal alignment loss
+
+    # Augmentations
     drug_augmentations: List[str] = field(default_factory=lambda: ['smiles_enum', 'atom_mask'])
     prot_augmentations: List[str] = field(default_factory=lambda: ['subseq_crop', 'residue_mask'])
     mask_ratio: float = 0.15
     crop_min_ratio: float = 0.7
     projection_dim: int = 64
+
+    # Pretrained LLM integration (Phase 4)
+    use_pretrained_embeddings: bool = True
+    pretrained_drug_model: str = 'seyonec/ChemBERTa-zinc-base-v1'  # Hugging Face model ID
+    pretrained_prot_model: str = 'facebook/esm2_t6_8M_UR50D'       # ESM-2 model
+    freeze_pretrained: bool = True
+    unfreeze_last_k_layers: int = 0
+    llm_alignment_weight: float = 0.1  # Weight for LLM-learned embedding alignment
+    cache_llm_embeddings: bool = True  # Cache to avoid recomputation
+
+@dataclass
+class MetaLearningConfig:
+    """Meta-learning configuration (Phase 5)"""
+    enabled: bool = False
+    meta_lr: float = 1e-3
+    inner_lr: float = 1e-2
+    num_inner_steps: int = 5
+    meta_batch_size: int = 4
+    k_support: int = 5                # Number of support samples
+    k_query: int = 10                 # Number of query samples
+    adaptation_scope: str = 'head_only'  # 'head_only' | 'partial_encoder' | 'full'
+    algorithm: str = 'maml'           # 'maml' | 'reptile'
+
+@dataclass
+class AttentionConfig:
+    """Pocket-guided attention configuration (Phase 6)"""
+    enabled: bool = False
+    num_heads: int = 4
+    attention_dropout: float = 0.1
+    use_pocket_mask: bool = False
+    residual_connection: bool = True
+
+@dataclass
+class UncertaintyConfig:
+    """Uncertainty estimation configuration (Phase 7)"""
+    enabled: bool = False
+    method: str = 'evidential'        # 'evidential' | 'conformal' | 'ensemble'
+    calibration_metric: str = 'ece'   # Expected Calibration Error
+    compute_reliability: bool = True
+
+@dataclass
+class MultiTaskConfig:
+    """Multi-task learning configuration (Phase 9)"""
+    enabled: bool = False
+    tasks: List[str] = field(default_factory=lambda: ['affinity'])  # 'affinity' | 'interaction' | 'moa'
+    loss_weights: Dict[str, float] = field(default_factory=lambda: {
+        'affinity': 1.0,
+        'interaction': 1.0,
+        'moa': 1.0
+    })
+    dynamic_weighting: bool = False   # Use GradNorm or uncertainty-based weighting
+    num_moa_classes: int = 10
 
 @dataclass
 class TrainConfig:
@@ -399,17 +488,41 @@ class TrainConfig:
     emb_dim: int = 128
     conv_out: int = 128
     freeze_strategy: str = 'full_finetune'  # 'frozen' | 'full_finetune' | 'gradual_unfreeze'
+    lr_scheduler: str = 'cosine'      # 'cosine' | 'plateau' | 'step' | 'none'
+    gradient_accumulation_steps: int = 1
+    mixed_precision: bool = True      # Use automatic mixed precision
 
 @dataclass
 class ExperimentConfig:
     data: DataConfig
     pretrain: PretrainConfig
     train: TrainConfig
-    model: str = 'deepdta'            # 'deepdta' | 'graphdta' | 'widedta' | 'attndta' | 'cl_dta'
+    meta: MetaLearningConfig
+    attention: AttentionConfig
+    uncertainty: UncertaintyConfig
+    multitask: MultiTaskConfig
+
+    model: str = 'cl_dta++'           # 'deepdta' | 'graphdta' | 'widedta' | 'attndta' | 'cl_dta' | 'cl_dta++'
     seed: int = 42
     device: str = 'cuda'
     results_dir: str = 'results/'
     tensorboard_dir: str = 'runs/'
+
+    # Ablation and experiment tracking (Phase 11)
+    experiment_name: str = 'default'
+    ablation_mode: str = 'none'       # 'none' | 'cross_modal_weight' | 'llm_init' | etc.
+    track_with_mlflow: bool = False
+    track_with_wandb: bool = False
+
+@dataclass
+class AblationConfig:
+    """Systematic ablation configuration (Phase 11)"""
+    enabled: bool = False
+    ablation_type: str = 'grid'       # 'grid' | 'random' | 'sequential'
+    num_seeds: int = 5                # Repeat each config with N seeds
+    parameters: Dict[str, List] = field(default_factory=dict)
+    compute_effect_sizes: bool = True
+    generate_latex_tables: bool = True
 ```
 
 #### Experiment Metrics (`utilities.py`)
@@ -813,13 +926,17 @@ sequenceDiagram
 
 ---
 
-## 5. Contrastive Pretraining — Theory & Design
+## 5. Cross-Modal Contrastive Pretraining — Theory & Design
 
 ### Theoretical Foundation
+
+**Key Innovation:** CL-DTA++ makes **cross-modal contrastive pretraining the default paradigm**, combining intra-modal and cross-modal learning in a unified framework (Phase 1).
 
 **References:**
 - Chen et al. _"A Simple Framework for Contrastive Learning of Visual Representations (SimCLR)."_ ICML 2020.
 - Oord et al. _"Representation Learning with Contrastive Predictive Coding."_ arXiv 2018.
+- Radford et al. _"Learning Transferable Visual Models From Natural Language Supervision (CLIP)."_ ICML 2021.
+- Wang et al. _"MolCLR: Molecular Contrastive Learning of Representations via Graph Neural Networks."_ Nature Machine Intelligence 2022.
 
 #### Problem Statement
 
@@ -827,43 +944,53 @@ Standard supervised DTA models learn drug and protein representations optimized 
 
 1. **Representation collapse to training entities:** Encoders learn features highly specific to training drugs/targets, not transferable structural features.
 2. **No incentive for structural similarity preservation:** Two structurally similar drugs may have vastly different representations if they never co-occur in training pairs.
+3. **Lack of cross-modal alignment:** Drug and protein embeddings live in unrelated spaces, losing information about binding compatibility.
 
-Contrastive pretraining addresses this by forcing encoders to learn **augmentation-invariant representations** — two augmented views of the same molecule must map to nearby points in embedding space, while views of different molecules must be distant. This produces representations that capture **intrinsic structural properties** rather than memorizing training entities.
+CL-DTA++ addresses this through a **three-component contrastive pretraining framework:**
 
-#### Contrastive Learning Objective
+1. **Intra-modal learning:** Drug–drug and protein–protein contrastive learning
+2. **Cross-modal alignment:** Drug–protein binding pair alignment
+3. **LLM knowledge transfer:** Alignment between pretrained LLM embeddings and learned representations (Phase 4)
 
-For a minibatch of $N$ entities (drugs or proteins), each entity $x_i$ is augmented twice to produce views $(x_i, x_i^+)$. The encoder $f$ and projection head $g$ map these to projections:
+#### Enhanced Contrastive Learning Objective
 
-$$z_i = g(f(\tilde{x}_i)), \quad z_i^+ = g(f(\tilde{x}_i^+))$$
+**Component 1: Intra-Modal NT-Xent Loss**
 
-The NT-Xent loss for one positive pair $(z_i, z_i^+)$ is:
+For drugs, with minibatch of $N$ molecules, each augmented twice:
 
-$$\ell(i, i^+) = -\log \frac{\exp(\text{sim}(z_i, z_i^+) / \tau)}{\sum_{k=1}^{2N} \mathbb{1}[k \neq i] \cdot \exp(\text{sim}(z_i, z_k) / \tau)}$$
+$$\mathcal{L}_{\text{drug}} = -\frac{1}{2N}\sum_{i=1}^{N}\Bigl[\log\frac{\exp(\text{sim}(z_i, z_i^+)/\tau)}{\sum_{k \neq i}\exp(\text{sim}(z_i, z_k)/\tau)} + \log\frac{\exp(\text{sim}(z_i^+, z_i)/\tau)}{\sum_{k \neq i}\exp(\text{sim}(z_i^+, z_k)/\tau)}\Bigr]$$
 
-where $\text{sim}(u, v) = u^\top v / (\|u\| \|v\|)$ is cosine similarity, and $\tau$ is the temperature parameter controlling the concentration of the distribution.
+Similarly for proteins: $\mathcal{L}_{\text{protein}}$
 
-The total loss is computed symmetrically over all $2N$ views in the minibatch:
+**Component 2: Cross-Modal Alignment Loss (Default in CL-DTA++)**
 
-$$\mathcal{L}_{\text{NT-Xent}} = \frac{1}{2N} \sum_{i=1}^{N} \bigl[\ell(2i-1, 2i) + \ell(2i, 2i-1)\bigr]$$
+For known drug–target binding pairs $(d_k, p_k)$ in the minibatch:
 
-#### Why NT-Xent Over InfoNCE
+$$\mathcal{L}_{\text{align}} = -\frac{1}{M}\sum_{k=1}^{M}\Bigl[\log\frac{\exp(\text{sim}(z_{d_k}, z_{p_k})/\tau)}{\sum_{j=1}^{B_p}\exp(\text{sim}(z_{d_k}, z_{p_j})/\tau)} + \log\frac{\exp(\text{sim}(z_{p_k}, z_{d_k})/\tau)}{\sum_{j=1}^{B_d}\exp(\text{sim}(z_{p_k}, z_{d_j})/\tau)}\Bigr]$$
 
-| Property | NT-Xent | InfoNCE |
-|---|---|---|
-| Symmetry | Symmetric (both views serve as anchor) | Asymmetric (one view is anchor) |
-| Negative count | $2N - 2$ per anchor | $N - 1$ per anchor |
-| Gradient signal | Stronger (more negatives per step) | Weaker per step |
-| Computation | 2× similarity matrix | 1× similarity matrix |
+where $M$ is the number of known pairs, $B_p$ is batch proteins, $B_d$ is batch drugs.
 
-NT-Xent provides more gradient signal per minibatch, which is especially important for small datasets like DAVIS (only 68 unique drugs).
+**Component 3: LLM Embedding Alignment Loss (Phase 4)**
 
-#### Cross-Modal Alignment (Optional)
+To leverage pretrained knowledge from ESM (proteins) and ChemBERTa (drugs):
 
-For known drug–target binding pairs, an additional alignment loss encourages the drug representation to be closer to its binding partner's representation than to random proteins:
+$$\mathcal{L}_{\text{llm}} = \frac{1}{N}\sum_{i=1}^{N}\Bigl[\text{MSE}(z_i^{\text{learned}}, z_i^{\text{llm}}) + \lambda \cdot (1 - \text{cos}(z_i^{\text{learned}}, z_i^{\text{llm}}))\Bigr]$$
 
-$$\mathcal{L}_{\text{align}} = -\frac{1}{M} \sum_{(d,p) \in \mathcal{P}} \log \frac{\exp(\text{sim}(z_d, z_p) / \tau)}{\sum_{p' \in \mathcal{B}} \exp(\text{sim}(z_d, z_{p'}) / \tau)}$$
+**Total Pretraining Loss:**
 
-where $\mathcal{P}$ is the set of known binding pairs in the minibatch and $\mathcal{B}$ is the set of all proteins in the minibatch.
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{drug}} + \mathcal{L}_{\text{protein}} + \alpha \cdot \mathcal{L}_{\text{align}} + \beta \cdot \mathcal{L}_{\text{llm}}$$
+
+where $\alpha$ (default 0.5) and $\beta$ (default 0.1) are tunable in config.
+
+#### Why This Design?
+
+| Advantage | Mechanism |
+|---|---|
+| **Better generalization** | Intra-modal learning captures structural similarity across entities |
+| **Cross-modal consistency** | Alignment ensures binding partners are nearby in joint space |
+| **Knowledge transfer** | LLM embeddings inject large-scale biomedical/chemical knowledge |
+| **Efficient training** | Single unified loss, one backprop per batch |
+| **Interpretability** | Can visualize learned joint embedding space |
 
 ### Pretraining Architecture
 
@@ -1857,63 +1984,1681 @@ python -m pytest tests/ --cov=Implementation_of_DeepDTA_pipeline --cov-report=ht
 
 ---
 
-## 15. Suggested Improvements
+## 15. Key Design Decisions
 
-### Critical (Correctness / Rigor)
+(Content to be migrated from section 8)
 
-| Issue | Risk | Fix |
+---
+
+## 16. Failure & Edge Case Analysis
+
+(Content to be migrated from section 9)
+
+---
+
+## 17. Training & Evaluation Pipeline
+
+(Content to be migrated from section 10)
+
+---
+
+## 18. Baseline Models & SOTA Comparisons
+
+### Traditional Baselines
+
+| Model | Architecture | Key Features |
 |---|---|---|
-| **`spearmanr_np` uses ordinal ranking** | Incorrect Spearman correlation when ties exist (current implementation assigns ordinal ranks instead of average ranks) | Fix rank function to use proper average ranking for ties |
-| **No `cold_both` split implemented** | Missing the hardest evaluation setting — a key differentiator of this work | Implement groupwise drug × target split in `data_loading.py` |
-| **No entity leakage verification** | Could silently produce invalid cold-split results | Add programmatic assertions after every split |
-| **$O(n^2)$ CI on large test sets** | KIBA test sets (~12K) take minutes for CI computation | Add sampled CI with configurable sample count |
+| DeepDTA | Parallel 1D CNN encoders | Base architecture for comparison |
+| GraphDTA | GCN/GAT drug encoder + CNN protein | Graph-based molecular representation |
+| Wide DTA | LMCS drug encoder + CNN protein | Domain-word-based encoding |
+| AttentionDTA | Self-attention + CNN | Attention for sequence modeling |
 
-### High (Research Quality)
+### Recent SOTA Methods (2024–2026)
 
-| Issue | Risk | Fix |
+| Model | Year | Key Innovation | Comparison Status |
+|---|---|---|---|
+| **LLMDTA** | 2024 | Biological LLM + bilinear attention | Required baseline |
+| **CSCo-DTA / TCCL** | 2024 | Cross-scale / twin cross-contrastive | Required baseline |
+| **PMHGT-DTA** | 2025 | Pocket-focused multimodal heterogeneous graph | Optional |
+| **DrugCLIP-style** | 2025 | Pocket-guided contrastive learning | Optional |
+| **AdaMBind** | 2025 | Meta-learning for DTA | Optional (compares with our Phase 5) |
+| **Evidential DTA variants** | 2025 | Uncertainty-aware prediction | Optional (compares with our Phase 7) |
+
+### Baseline Integration Strategy
+
+```python
+class BaselineFactory:
+    """Unified interface for loading and evaluating baseline models"""
+
+    @staticmethod
+    def load_baseline(name: str, config: dict):
+        """Returns model instance with standardized interface"""
+        if name == "llmdta":
+            return LLMDTAWrapper(config)
+        elif name == "csco_dta":
+            return CScoDTAWrapper(config)
+        # ... other baselines
+
+    @staticmethod
+    def evaluate_baseline(model, test_data, splits):
+        """Runs baseline on same splits with same metrics"""
+        pass
+```
+
+**Fair Comparison Requirements:**
+- Same train/val/test splits (saved and reused)
+- Same random seeds across all methods
+- Same hardware resources tracked
+- Same evaluation metrics computed identically
+- Statistical significance testing on differences
+
+---
+
+## 19. Comprehensive Ablation Framework
+
+### Systematic Ablation Matrix
+
+The ablation framework systematically evaluates the contribution of each component across multiple dimensions.
+
+#### Core Ablations (Phase 11)
+
+| Ablation Category | Variants | Metrics Tracked |
 |---|---|---|
-| **No cross-validation for cold splits** | Single train/test split may not represent general performance | Implement 5-fold entity-group CV |
-| **No significance testing** | Cannot claim CL-DTA is statistically better than baselines | Add paired t-test / Wilcoxon across folds × seeds |
-| **No ablation framework** | Cannot determine which augmentations or design choices matter | Create systematic ablation runner |
-| **No experiment tracking** | Hard to manage 120+ experiments | Add MLflow or W&B integration; at minimum JSON logs |
-| **Preprocess.py has duplicate imports and hardcoded paths** | Fragile, not portable across machines | Refactor with CLI args and `os.path.join()` |
+| **Cross-modal alignment weight** | 0.0, 0.1, 0.5, 1.0, 2.0 | MSE, CI, Pearson |
+| **Pretraining scale** | DAVIS only, KIBA only, Both, +BindingDB | Generalization gap |
+| **LLM initialization** | None, ESM only, ChemBERTa only, Both | Cold-start performance |
+| **Meta-learning** | No meta, MAML, Reptile | Few-shot curves (1/5/10 shots) |
+| **Attention module** | Off, Standard, Pocket-guided | Binding region focus |
+| **Uncertainty head** | Deterministic, Evidential, Conformal | ECE, coverage |
+| **Multi-task** | Affinity only, +Binary, +MoA | Task synergy analysis |
+| **Freeze strategies** | Frozen, Partial, Full finetune | Training efficiency |
+| **Augmentation combinations** | All combinations of 6 augmentations | Representation quality |
 
-### Medium (Performance / Usability)
+### Ablation Runner Implementation
 
-| Issue | Impact | Fix |
-|---|---|---|
-| **No learning rate scheduler in pretraining** | Suboptimal convergence | Add cosine annealing with warm restarts |
-| **No gradient accumulation** | Cannot use large effective batch sizes on small GPUs | Add accumulation steps parameter |
-| **Checkpoint saving is not systematic** | Multiple checkpoints accumulate, unclear which is best | Save only best + last; include config in checkpoint |
-| **No resume from checkpoint** | Training restarts from scratch after interruption | Add `--resume` flag loading optimizer state + epoch |
-| **TensorBoard not integrated** | No real-time training visualization | Add `SummaryWriter` calls in `train.py` |
+```python
+class AblationRunner:
+    """Orchestrates comprehensive ablation studies"""
 
-### Low (Code Quality / Future Work)
+    def __init__(self, base_config: ExperimentConfig):
+        self.base_config = base_config
+        self.results = []
 
-| Issue | Impact | Fix |
-|---|---|---|
-| **No type hints in data_loading.py** | Reduced readability and IDE support | Add full type annotations |
-| **No SMILES-specific tokenizer** | `Cl`, `Br`, `@@` split into individual characters | Add regex-based SMILES tokenizer as option |
-| **No 3D protein structure** | Sequence-only limits binding site representation | Integrate AlphaFold embeddings (future work) |
-| **No external pretraining corpus** | Limited diversity for contrastive pretraining (68 drugs in DAVIS) | Pretrain on ChEMBL (~2M compounds) in v2 |
-| **No Transformer encoder option** | CNN capacity ceiling | Add Transformer encoder variant (future work) |
+    def run_ablation_grid(self, ablation_configs: Dict[str, List]):
+        """
+        Run grid search over ablation parameters.
 
-### Architecture Evolution Path
+        Example:
+            ablation_configs = {
+                'align_loss_weight': [0.0, 0.1, 0.5, 1.0],
+                'use_pretrained_embeddings': [False, True],
+                'meta_learning': [False, True]
+            }
+        """
+        for config_combo in itertools.product(*ablation_configs.values()):
+            # Create modified config
+            modified_config = self._apply_ablation(config_combo)
+
+            # Run experiment
+            result = run_single_experiment(modified_config)
+            self.results.append({
+                'config': config_combo,
+                'metrics': result
+            })
+
+    def compute_effect_sizes(self):
+        """Compute Cohen's d for each ablation component"""
+        pass
+
+    def generate_ablation_report(self, output_path: str):
+        """Generate LaTeX tables and visualizations"""
+        pass
+```
+
+### Ablation Analysis Outputs
+
+1. **Effect Size Matrix:** Cohen's d for each component
+2. **Interaction Analysis:** Two-way ANOVAs to detect synergies
+3. **Critical Component Identification:** Which components are essential?
+4. **Ablation Heatmaps:** Performance across parameter combinations
+5. **Bar Charts:** Contribution of each component to final performance
+
+---
+
+## 20. Statistical Rigor & Reproducibility
+
+### Statistical Testing Protocol
+
+**Requirements for Publication Claims:**
+
+1. **Multiple Seeds:** All experiments repeated with ≥5 random seeds
+2. **Cross-Validation:** 5-fold entity-group CV on cold splits
+3. **Significance Testing:**
+   - Paired t-test for normally distributed metrics
+   - Wilcoxon signed-rank for non-normal distributions
+   - Bonferroni correction for multiple comparisons
+4. **Effect Sizes:** Report Cohen's d alongside p-values
+5. **Confidence Intervals:** 95% CI on all reported metrics
+
+### Statistical Analysis Implementation
+
+```python
+def compare_models_statistically(
+    results_baseline: pd.DataFrame,
+    results_proposed: pd.DataFrame,
+    metric: str = 'mse',
+    alpha: float = 0.05
+) -> Dict:
+    """
+    Perform statistical comparison between models.
+
+    Returns:
+        {
+            'p_value': float,
+            'effect_size': float,  # Cohen's d
+            'ci_lower': float,     # 95% CI on difference
+            'ci_upper': float,
+            'significant': bool,
+            'test_used': str       # 't-test' or 'wilcoxon'
+        }
+    """
+    # Check normality
+    _, p_baseline = scipy.stats.shapiro(results_baseline[metric])
+    _, p_proposed = scipy.stats.shapiro(results_proposed[metric])
+
+    if p_baseline > 0.05 and p_proposed > 0.05:
+        # Use paired t-test
+        statistic, p_value = scipy.stats.ttest_rel(
+            results_proposed[metric],
+            results_baseline[metric]
+        )
+        test_used = 't-test'
+    else:
+        # Use Wilcoxon signed-rank
+        statistic, p_value = scipy.stats.wilcoxon(
+            results_proposed[metric],
+            results_baseline[metric]
+        )
+        test_used = 'wilcoxon'
+
+    # Compute effect size (Cohen's d)
+    diff = results_proposed[metric].mean() - results_baseline[metric].mean()
+    pooled_std = np.sqrt(
+        (results_baseline[metric].std()**2 + results_proposed[metric].std()**2) / 2
+    )
+    cohens_d = diff / pooled_std
+
+    # Confidence interval
+    ci = scipy.stats.t.interval(
+        0.95,
+        len(results_proposed) - 1,
+        loc=diff,
+        scale=scipy.stats.sem(results_proposed[metric] - results_baseline[metric])
+    )
+
+    return {
+        'p_value': p_value,
+        'effect_size': cohens_d,
+        'ci_lower': ci[0],
+        'ci_upper': ci[1],
+        'significant': p_value < alpha,
+        'test_used': test_used
+    }
+```
+
+### Reproducibility Checklist
+
+- [ ] **Environment:** `requirements.txt` with pinned versions
+- [ ] **Seeds:** All random seeds logged and configurable
+- [ ] **Data:** Splits saved and versioned (MD5 checksums)
+- [ ] **Code:** Git commit hash in experiment logs
+- [ ] **Configs:** All hyperparameters in YAML configs (no hardcoded values)
+- [ ] **Checkpoints:** Best models uploaded to Hugging Face Hub
+- [ ] **Hardware:** GPU model and memory logged
+- [ ] **Timing:** Wall-clock time and FLOPs reported
+- [ ] **Documentation:** README with "How to reproduce main results" section
+- [ ] **Tests:** Unit tests for critical components (data splitting, metrics)
+
+### Publication Artifact Generation
+
+```python
+def generate_paper_artifacts(results_dir: str, output_dir: str):
+    """
+    Automatically generate all tables and figures for paper.
+
+    Outputs:
+        - main_results_table.tex (Table 1)
+        - ablation_matrix.tex (Table 2)
+        - cold_split_comparison.pdf (Figure 1)
+        - embedding_umap_comparison.pdf (Figure 2)
+        - attention_heatmaps.pdf (Figure 3)
+        - uncertainty_calibration.pdf (Figure 4)
+        - meta_learning_curves.pdf (Figure 5)
+    """
+    pass
+```
+
+### Experiment Tracking Integration
+
+```python
+# MLflow integration example
+import mlflow
+
+with mlflow.start_run(run_name=f"{config.model}_{config.data.split}"):
+    # Log parameters
+    mlflow.log_params(flatten_config(config))
+
+    # Train model
+    results = train_and_evaluate(model, config)
+
+    # Log metrics
+    for metric_name, value in results.metrics.items():
+        mlflow.log_metric(metric_name, value)
+
+    # Log artifacts
+    mlflow.log_artifact("results/plots/")
+    mlflow.pytorch.log_model(model, "model")
+```
+
+---
+
+## 21. Developer Onboarding Guide
+
+(Content to be migrated from section 14)
+
+---
+
+## 22. Implementation Roadmap
+
+This section maps out the 11-phase enhancement plan that transforms CL-DTA into CL-DTA++.
+
+### Phase 1: Cross-Modal Contrastive Pretraining (Default Paradigm)
+
+**Objective:** Make cross-modal alignment the default training paradigm, combining intra-modal and cross-modal contrastive learning.
+
+**Key Changes:**
+- Update `config.py`: Add `use_cross_modal: bool = True`, `align_loss_weight: float`, `temperature: float`
+- Implement `cross_modal_alignment_loss()` in `contrastive_losses.py`
+- Refactor `pretrain.py` to support joint batch construction (drug pairs + protein pairs + aligned drug-protein pairs)
+- Training loop computes: `loss_total = loss_drug + loss_protein + align_weight * loss_align`
+
+**Success Criteria:**
+- Cross-modal loss runs without shape errors
+- All three loss components decrease during training
+- No data leakage between modalities
+
+---
+
+### Phase 2: Strict Cold-Both Split & Leakage Verification
+
+**Objective:** Implement production-grade cold-both split with programmatic leakage verification and 5-fold entity-group CV.
+
+**Key Changes:**
+- Implement `cold_both_split()` in `data_loading.py`:
+  - Partition drugs independently into train/val/test
+  - Partition proteins independently into train/val/test
+  - Construct datasets ensuring no entity overlap
+- Implement `SplitInfo.verify_no_leakage()` class with strict assertions
+- Implement `create_entity_group_folds()` for 5-fold CV
+- Add deterministic seeding and logging of split statistics
+
+**Success Criteria:**
+- Zero entity overlap verified programmatically
+- Works across multiple seeds without silent failures
+- No empty splits under reasonable data distribution
+
+---
+
+### Phase 3: Large-Scale Datasets (BindingDB + Pharos)
+
+**Objective:** Scale to millions of samples and add true zero-shot evaluation on dark proteins.
+
+**Key Changes:**
+- Implement `load_bindingdb()` in `preprocess.py`:
+  - Parse raw BindingDB (CSV/TSV)
+  - Normalize affinity units to common scale (pKd / pKi)
+  - Filter invalid/duplicate entries
+- Implement `BindingDBDataset` with memory-efficient lazy loading
+- Implement `load_pharos()` for dark protein extraction (< 10 known interactions)
+- Add `cold_pharos` split mode: train on annotated proteins, test on dark proteins
+
+**Success Criteria:**
+- Can iterate over BindingDB without memory crash
+- Training throughput remains stable with large datasets
+- Pharos split correctly isolates dark proteins
+- Data normalization is chemically correct
+
+---
+
+### Phase 4: Pretrained LLM Integration
+
+**Objective:** Initialize encoders with pretrained biological/chemical LLMs and add alignment loss.
+
+**Key Changes:**
+- Implement `PretrainedEncoder` class in `model.py`:
+  - Load ESM (protein) or ChemBERTa (drug) from Hugging Face
+  - Extract embeddings (CLS token or mean pooling)
+  - Project to common embedding space
+- Add tokenization pipeline (`tokenizers_and_datasets.py`)
+- Implement `embedding_alignment_loss()` to align LLM and learned embeddings
+- Add config options: `use_pretrained_embeddings`, `freeze_pretrained`, `unfreeze_last_k_layers`
+- Optional LLM embedding caching to avoid recomputation
+
+**Success Criteria:**
+- Model trains with pretrained embeddings
+- Alignment loss decreases over time
+- No major slowdown vs baseline
+- Improved representation quality on similarity checks
+
+---
+
+### Phase 5: Meta-Learning (MAML)
+
+**Objective:** Enable few-shot adaptation to unseen drugs/proteins.
+
+**Key Changes:**
+- Implement `MetaDTADataset` in new `meta_dataset.py`:
+  - Sample tasks with support/query sets
+  - Simulate cold-start scenarios
+- Implement `meta_train_step()` in `train.py`:
+  - Inner loop: adapt on support set (1–5 gradient steps)
+  - Outer loop: meta-update on query set loss
+- Config options: `meta_lr`, `inner_lr`, `num_inner_steps`, `meta_batch_size`
+- Use `higher` library or PyTorch functional API for efficiency
+
+**Success Criteria:**
+- Model improves after few-shot adaptation
+- Meta-loss decreases over training
+- Works on cold-drug, cold-target, and cold-both tasks
+
+---
+
+### Phase 6: Pocket-Guided Attention
+
+**Objective:** Add lightweight structural awareness via cross-attention between drug and protein.
+
+**Key Changes:**
+- Implement `PocketGuidedAttention` module in `model_attndta.py`:
+  - Cross-attention with query=drug, key/value=protein sequence
+  - Optional pocket masking to bias attention toward binding regions
+  - Residual connection for stability
+- Integration during fine-tuning only (not pretraining)
+- Config options: `use_attention_module`, `attention_heads`
+- Return attention weights for interpretability
+
+**Success Criteria:**
+- Model trains with attention enabled without major slowdown
+- Attention weights are non-uniform (sanity check)
+- Improves performance on interaction prediction tasks
+- Attention maps are biologically interpretable
+
+---
+
+### Phase 7: Uncertainty Estimation (Evidential Regression)
+
+**Objective:** Replace deterministic regression with uncertainty-aware prediction.
+
+**Key Changes:**
+- Implement `EvidentialRegressionHead` in `model.py`:
+  - Output parameters: (μ, v, α, β) for evidential distribution
+  - Constraints: v > 0, α > 1, β > 0 (softplus activations)
+- Implement `evidential_loss()` in `utilities.py` or `losses.py`
+- Implement calibration metrics:
+  - Expected Calibration Error (ECE)
+  - Coverage probability
+- Implement reliability metrics:
+  - Distance-based reliability (embedding distance from training set)
+  - Uncertainty-error correlation
+
+**Success Criteria:**
+- Model outputs meaningful uncertainty (not constant)
+- High uncertainty correlates with high error
+- Calibration metrics are reasonable (ECE < 0.1)
+- Especially effective on cold-start splits
+
+---
+
+### Phase 8: Interpretability & Analysis
+
+**Objective:** Provide publication-quality interpretability and theoretical analysis.
+
+**Key Changes:**
+- Implement `plot_embeddings()` in `visualization.py`:
+  - UMAP/t-SNE projections with structural labels
+  - Before vs after contrastive learning comparison
+- Implement `compute_mutual_information()`:
+  - Quantify structural information captured in embeddings
+  - Compare pretrained vs post-contrastive
+- Extract and visualize attention maps from Phase 6 module
+- Implement `compare_embedding_similarity()`:
+  - Intra-class vs inter-class similarity analysis
+- Add theoretical analysis:
+  - Temperature effect on embedding spread
+  - Collapse detection
+  - Variance analysis
+
+**Success Criteria:**
+- Clear clustering improvements visible in UMAP after contrastive learning
+- Higher mutual information scores post-training
+- Attention maps correlate with known binding sites
+- Quantitative evidence supports architectural claims
+
+---
+
+### Phase 9: Multi-Task Learning
+
+**Objective:** Train single backbone to predict affinity, binary interaction, and MoA simultaneously.
+
+**Key Changes:**
+- Implement `MultiTaskHead` in `model.py`:
+  - Three output branches: affinity (regression), interaction (binary), MoA (classification)
+  - Shared backbone (pretrained encoders + attention)
+- Update dataset to return multiple labels (with optional masking for missing labels)
+- Implement loss balancing:
+  - Configurable weights or dynamic weighting (GradNorm)
+  - `loss_total = w1*loss_affinity + w2*loss_interaction + w3*loss_moa`
+- Track per-task metrics separately
+
+**Success Criteria:**
+- All tasks train simultaneously without collapse
+- Performance improves or remains stable vs single-task
+- No task domination (check loss magnitudes)
+
+---
+
+### Phase 10: Systematic Evaluation & Publication Framework
+
+**Objective:** Create production-grade evaluation orchestration for rigorous scientific claims.
+
+**Key Changes:**
+- Implement `AblationRunner` class in `ablation_runner.py`:
+  - Automated grid search over ablation parameters
+  - Effect size computation (Cohen's d)
+  - Interaction analysis
+- Integrate SOTA baselines (LLMDTA, CSCo-DTA, etc.) via `BaselineFactory`
+- Implement statistical analysis layer:
+  - Paired t-test / Wilcoxon with multiple comparison correction
+  - Confidence intervals on all metrics
+- Implement `generate_paper_artifacts()`:
+  - LaTeX tables
+  - Publication-quality figures
+  - Automated leaderboard generation
+- Add MLflow / Weights & B iases integration
+- Create Hugging Face model cards and dataset cards
+
+**Success Criteria:**
+- Automated ablation suite runs end-to-end
+- Statistically significant gains demonstrated on hardest splits (cold-both + cold_pharos)
+- Publication-ready tables and figures generated automatically
+- Clear insights into which components matter most
+- Fully reproducible by external researchers
+
+---
+
+### Implementation Timeline & Dependencies
 
 ```mermaid
-graph LR
-    A["Current:<br/>CNN Encoders<br/>+ NT-Xent Contrastive<br/>+ Cold-Start Splits"] --> B["Add SMILES-specific<br/>tokenizer<br/>(regex-based)"]
-    B --> C["Pretrain on external<br/>corpora<br/>(ChEMBL / UniProt)"]
-    C --> D["Replace CNN with<br/>Transformer encoders<br/>(ChemBERTa / ProtBERT)"]
-    D --> E["Multi-task learning<br/>(affinity + selectivity<br/>+ ADMET)"]
-    E --> F["3D structure<br/>integration<br/>(AlphaFold + docking)"]
+graph TB
+    P1[Phase 1: Cross-Modal<br/>Contrastive] --> P2[Phase 2: Cold-Both<br/>+ Leakage Check]
+    P2 --> P3[Phase 3: BindingDB<br/>+ Pharos]
+    P3 --> P4[Phase 4: Pretrained<br/>LLMs]
+    P4 --> P5[Phase 5: Meta-Learning]
+    P4 --> P6[Phase 6: Attention]
+    P5 --> P7[Phase 7: Uncertainty]
+    P6 --> P7
+    P7 --> P8[Phase 8: Interpretability]
+    P7 --> P9[Phase 9: Multi-Task]
+    P8 --> P11[Phase 11: Ablation<br/>& Publication]
+    P9 --> P11
 
-    style A fill:#3498db,color:#fff
-    style B fill:#2ecc71,color:#fff
-    style C fill:#e67e22,color:#fff
-    style D fill:#e67e22,color:#fff
-    style E fill:#95a5a6,color:#fff
-    style F fill:#95a5a6,color:#fff
+    style P1 fill:#3498db,color:#fff
+    style P2 fill:#2ecc71,color:#fff
+    style P3 fill:#e67e22,color:#fff
+    style P4 fill:#9b59b6,color:#fff
+    style P5 fill:#1abc9c,color:#fff
+    style P6 fill:#f39c12,color:#fff
+    style P7 fill:#e74c3c,color:#fff
+    style P8 fill:#34495e,color:#fff
+    style P9 fill:#16a085,color:#fff
+    style P11 fill:#c0392b,color:#fff
+```
+
+**Estimated Effort:**
+- Phase 1: 3-5 days (core contrastive loss refactor)
+- Phase 2: 2-3 days (splitting logic + verification)
+- Phase 3: 4-6 days (data pipeline + normalization)
+- Phase 4: 5-7 days (LLM integration + alignment)
+- Phase 5: 6-8 days (meta-learning framework)
+- Phase 6: 2-3 days (attention module)
+- Phase 7: 4-5 days (evidential head + calibration)
+- Phase 8: 4-6 days (visualization + MI analysis)
+- Phase 9: 3-4 days (multi-task head)
+- Phase 11: 5-7 days (ablation runner + stats)
+
+**Total:** ~40-55 days of focused development
+
+---
+
+## 8. Large-Scale Datasets — BindingDB & Pharos Dark Proteins
+
+### BindingDB Integration (Phase 3)
+
+**Objective:** Scale pretraining to millions of drug-target interaction samples.
+
+#### Dataset Characteristics
+
+| Property | BindingDB | DAVIS | KIBA |
+|---|---|---|---|
+| Samples | ~2.8M | ~30K | ~118K |
+| Unique Drugs | ~1.1M | 68 | 2,111 |
+| Unique Proteins | ~9K | 442 | 229 |
+| Affinity Types | Ki, IC50, Kd, EC50 | Kd | KIBA score |
+| Scale Challenge | Memory-intensive | Fits in RAM | Fits in RAM |
+
+#### Affinity Normalization Pipeline
+
+BindingDB contains mixed measurement units that must be normalized to a common scale:
+
+```python
+def normalize_bindingdb_affinity(value: float, unit: str, measurement_type: str) -> float:
+    """
+    Convert all bioactivity measurements to pX scale (pKd, pKi, pIC50).
+
+    Formula: pX = -log10(value_in_molar)
+
+    Conversions:
+        - nM → M: multiply by 1e-9
+        - µM → M: multiply by 1e-6
+        - mM → M: multiply by 1e-3
+    """
+    # Convert to molar
+    if unit == 'nM':
+        molar = value * 1e-9
+    elif unit == 'uM' or unit == 'µM':
+        molar = value * 1e-6
+    elif unit == 'mM':
+        molar = value * 1e-3
+    elif unit == 'M':
+        molar = value
+    else:
+        raise ValueError(f"Unknown unit: {unit}")
+
+    # Convert to pX
+    if molar <= 0:
+        return None  # Invalid measurement
+
+    px = -np.log10(molar)
+
+    # Filter extreme values (likely errors)
+    if px < 0 or px > 15:
+        return None
+
+    return px
+```
+
+#### Memory-Efficient Dataset Design
+
+```python
+class BindingDBDataset(torch.utils.data.Dataset):
+    """
+    Memory-efficient lazy-loading dataset for large-scale training.
+
+    Features:
+        - Memory-mapped reading (does NOT load full dataset into RAM)
+        - Pre-tokenized cache option
+        - Chunked iteration support
+        - Multi-worker data loading compatible
+    """
+
+    def __init__(self, data_path: str, config: DataConfig, use_cache: bool = True):
+        # Load metadata only (drug_id, protein_id, affinity)
+        self.metadata = pd.read_parquet(f"{data_path}/metadata.parquet")
+
+        # Memory-map tokenized sequences
+        if use_cache:
+            self.drug_tokens = np.load(f"{data_path}/drug_tokens.npy", mmap_mode='r')
+            self.prot_tokens = np.load(f"{data_path}/prot_tokens.npy", mmap_mode='r')
+        else:
+            # Load raw SMILES/sequences on-the-fly
+            self.tokenizer = Tokenizer(config)
+
+    def __getitem__(self, idx):
+        if self.use_cache:
+            drug = torch.from_numpy(self.drug_tokens[idx])
+            prot = torch.from_numpy(self.prot_tokens[idx])
+        else:
+            drug = self.tokenizer.tokenize(self.metadata.iloc[idx]['smiles'])
+            prot = self.tokenizer.tokenize(self.metadata.iloc[idx]['sequence'])
+
+        affinity = self.metadata.iloc[idx]['affinity']
+        return {'drug': drug, 'protein': prot, 'affinity': affinity}
+```
+
+### Pharos Dark Protein Dataset
+
+**Definition:** Proteins with < 10 known ligand interactions (understudied, high-value drug targets).
+
+#### Zero-Shot Evaluation Protocol
+
+```python
+def create_cold_pharos_split(df: pd.DataFrame, dark_threshold: int = 10):
+    """
+    Create zero-shot dark protein split.
+
+    Train: All proteins with ≥ dark_threshold interactions
+    Test:  All proteins with < dark_threshold interactions (dark proteins)
+
+    Note: Drugs MAY overlap (realistic cold-target scenario)
+    """
+    interaction_counts = df.groupby('target_id').size()
+    dark_proteins = interaction_counts[interaction_counts < dark_threshold].index
+
+    test_df = df[df['target_id'].isin(dark_proteins)]
+    train_val_df = df[~df['target_id'].isin(dark_proteins)]
+
+    # Further split train/val
+    train_df, val_df = train_test_split(train_val_df, test_size=0.1, random_state=42)
+
+    # Verify no protein leakage
+    assert len(set(test_df['target_id']) & set(train_df['target_id'])) == 0
+
+    return train_df, val_df, test_df
+```
+
+#### Expected Statistics
+
+| Split | Proteins | Drugs | Samples | Avg Interactions/Protein |
+|---|---|---|---|---|
+| Train (annotated) | ~800 | ~100K | ~2.5M | ~3100 |
+| Val | ~100 | ~50K | ~300K | ~3000 |
+| Test (dark) | ~50 | ~30K | ~400 | ~8 |
+
+**Research Significance:** Dark proteins represent the most challenging generalization test — the model has almost no information about these targets during training.
+
+---
+
+## 9. Pretrained LLM Integration — ESM & ChemBERTa
+
+### Motivation
+
+Pretrained biological and chemical language models (LLMs) have been trained on billions of sequences/molecules and capture rich domain knowledge. Integrating them provides:
+
+1. **Better initialization** than random embeddings
+2. **Transfer learning** from large-scale pretraining
+3. **Reduced data requirements** for cold-start scenarios
+
+### Architecture Integration (Phase 4)
+
+```python
+class PretrainedEncoder(nn.Module):
+    """
+    Wrapper for pretrained LLM encoders with projection layer.
+
+    Supported Models:
+        - Proteins: ESM-2 (facebook/esm2_*)
+        - Drugs: ChemBERTa (seyonec/ChemBERTa-zinc-base-v1)
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        output_dim: int,
+        freeze: bool = True,
+        unfreeze_last_k: int = 0
+    ):
+        super().__init__()
+
+        # Load pretrained model from Hugging Face
+        self.llm = AutoModel.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        # Freeze strategy
+        if freeze:
+            for param in self.llm.parameters():
+                param.requires_grad = False
+
+            # Optionally unfreeze last k layers
+            if unfreeze_last_k > 0:
+                layers = list(self.llm.encoder.layer)[-unfreeze_last_k:]
+                for layer in layers:
+                    for param in layer.parameters():
+                        param.requires_grad = True
+
+        # Projection to common embedding space
+        self.projection = nn.Sequential(
+            nn.Linear(self.llm.config.hidden_size, output_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+
+    def forward(self, input_ids, attention_mask):
+        # Get LLM embeddings
+        outputs = self.llm(input_ids=input_ids, attention_mask=attention_mask)
+
+        # Extract representation (CLS token or mean pooling)
+        if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+            embedding = outputs.pooler_output
+        else:
+            # Mean pooling over sequence
+            embedding = (outputs.last_hidden_state * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(-1, keepdim=True)
+
+        # Project to common space
+        projected = self.projection(embedding)
+
+        return projected, embedding  # Return both projected and raw LLM embedding
+```
+
+### LLM Embedding Alignment Loss
+
+To ensure learned representations stay consistent with LLM knowledge:
+
+```python
+def embedding_alignment_loss(learned_embeddings, llm_embeddings, config):
+    """
+    Align learned embeddings with pretrained LLM embeddings.
+
+    Combines:
+        - MSE loss (magnitude matching)
+        - Cosine similarity loss (direction matching)
+    """
+    # Normalize both
+    learned_norm = F.normalize(learned_embeddings, p=2, dim=-1)
+    llm_norm = F.normalize(llm_embeddings, p=2, dim=-1)
+
+    # MSE component
+    mse_loss = F.mse_loss(learned_embeddings, llm_embeddings)
+
+    # Cosine similarity component (maximize similarity = minimize negative)
+    cos_sim = F.cosine_similarity(learned_norm, llm_norm, dim=-1).mean()
+    cos_loss = 1 - cos_sim
+
+    return mse_loss + config.llm_alignment_weight * cos_loss
+```
+
+### Training Integration
+
+```python
+# In pretraining loop
+for batch in dataloader:
+    # Forward through both LLM and learned encoders
+    learned_drug_emb = drug_encoder(drug_tokens)
+    learned_prot_emb = prot_encoder(prot_tokens)
+
+    llm_drug_emb = pretrained_drug_encoder(drug_input_ids, drug_attention_mask)[1]  # Raw LLM embedding
+    llm_prot_emb = pretrained_prot_encoder(prot_input_ids, prot_attention_mask)[1]
+
+    # Compute losses
+    loss_contrastive = nt_xent_loss(learned_drug_emb, learned_prot_emb)
+    loss_alignment = (
+        embedding_alignment_loss(learned_drug_emb, llm_drug_emb, config) +
+        embedding_alignment_loss(learned_prot_emb, llm_prot_emb, config)
+    )
+
+    loss_total = loss_contrastive + config.llm_alignment_weight * loss_alignment
+```
+
+### Caching Strategy
+
+LLM forward passes are expensive. To avoid recomputation:
+
+```python
+# Precompute and cache LLM embeddings for entire dataset
+if config.cache_llm_embeddings:
+    cache_llm_embeddings(
+        dataset=train_dataset,
+        llm_model=pretrained_encoder,
+        output_path='cache/llm_embeddings.pt'
+    )
+    # Load from cache during training
+    llm_embeddings = torch.load('cache/llm_embeddings.pt', mmap_mode='r')
+```
+
+---
+
+## 10. Meta-Learning for Few-Shot Adaptation
+
+### MAML-Style Meta-Learning (Phase 5)
+
+**Objective:** Enable rapid adaptation to unseen drugs/proteins with only 1-10 labeled examples.
+
+#### Task Construction
+
+```python
+class MetaDTADataset:
+    """
+    Episode-based dataset for meta-learning.
+
+    Each episode simulates a cold-start scenario:
+        - Support set: k labeled examples of unseen entity
+        - Query set: m additional examples for evaluation
+    """
+
+    def sample_task(self, k_support: int = 5, k_query: int = 10, task_type: str = 'cold_drug'):
+        """
+        Sample a meta-learning task.
+
+        Task types:
+            - 'cold_drug': Unseen drug with k labeled protein interactions
+            - 'cold_target': Unseen protein with k labeled drug interactions
+            - 'cold_both': Unseen drug AND protein
+        """
+        if task_type == 'cold_drug':
+            # Randomly select one unseen drug
+            drug_id = np.random.choice(self.unseen_drugs)
+            drug_samples = self.data[self.data['drug_id'] == drug_id]
+
+            # Sample support and query sets
+            support_indices = np.random.choice(len(drug_samples), size=k_support, replace=False)
+            remaining_indices = list(set(range(len(drug_samples))) - set(support_indices))
+            query_indices = np.random.choice(remaining_indices, size=min(k_query, len(remaining_indices)), replace=False)
+
+            support_set = drug_samples.iloc[support_indices]
+            query_set = drug_samples.iloc[query_indices]
+
+        return support_set, query_set
+```
+
+#### Meta-Training Loop
+
+```python
+def meta_train_step(model, task_batch, config, meta_optimizer):
+    """
+    Single meta-training step using MAML.
+
+    Args:
+        task_batch: List of (support_set, query_set) tuples
+        config: MetaLearningConfig
+        meta_optimizer: Optimizer for meta-parameters
+    """
+    meta_loss = 0.0
+
+    for support_set, query_set in task_batch:
+        # Clone model for inner loop
+        task_model = clone_model(model)
+
+        # Inner loop: Adapt on support set
+        inner_optimizer = torch.optim.SGD(
+            task_model.parameters(),
+            lr=config.inner_lr
+        )
+
+        for inner_step in range(config.num_inner_steps):
+            support_loss = compute_dta_loss(task_model, support_set)
+            inner_optimizer.zero_grad()
+            support_loss.backward()
+            inner_optimizer.step()
+
+        # Evaluate adapted model on query set
+        query_loss = compute_dta_loss(task_model, query_set)
+        meta_loss += query_loss
+
+    # Outer loop: Update meta-parameters
+    meta_loss /= len(task_batch)
+    meta_optimizer.zero_grad()
+    meta_loss.backward()
+    meta_optimizer.step()
+
+    return meta_loss.item()
+```
+
+#### Evaluation: Few-Shot Curves
+
+```python
+def evaluate_few_shot(model, test_tasks, shot_sizes=[1, 5, 10]):
+    """
+    Evaluate few-shot adaptation performance.
+
+    Returns performance curves showing improvement with more shots.
+    """
+    results = {k: [] for k in shot_sizes}
+
+    for task in test_tasks:
+        full_support, query_set = task
+
+        for k_shot in shot_sizes:
+            # Use only k examples from support set
+            support_subset = full_support[:k_shot]
+
+            # Adapt model
+            adapted_model = adapt_model(model, support_subset, num_steps=5)
+
+            # Evaluate on query set
+            metrics = evaluate(adapted_model, query_set)
+            results[k_shot].append(metrics)
+
+    return {k: np.mean(v) for k, v in results.items()}
+```
+
+---
+
+## 11. Pocket-Guided Attention Mechanism
+
+### Cross-Attention for Structural Awareness (Phase 6)
+
+**Motivation:** Binding affinity is determined by local interaction between drug and binding pocket, not the entire protein sequence. Attention mechanisms can learn to focus on relevant regions.
+
+#### Architecture
+
+```python
+class PocketGuidedAttention(nn.Module):
+    """
+    Cross-attention module: drug queries protein sequence to identify binding regions.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int):
+        super().__init__()
+        self.multihead_attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=0.1,
+            batch_first=True
+        )
+        self.layer_norm = nn.LayerNorm(embed_dim)
+
+    def forward(
+        self,
+        drug_embedding: torch.Tensor,  # (B, D)
+        protein_embedding: torch.Tensor,  # (B, L, D) - sequence-level features
+        pocket_mask: Optional[torch.Tensor] = None  # (B, L) - optional mask
+    ):
+        """
+        Args:
+            drug_embedding: Global drug representation (B, D)
+            protein_embedding: Per-residue protein features (B, L, D)
+            pocket_mask: Optional binary mask highlighting binding pocket residues
+
+        Returns:
+            enhanced_drug_emb: Context-aware drug representation (B, D)
+            attention_weights: Attention distribution over protein (B, num_heads, 1, L)
+        """
+        # Expand drug to sequence format
+        drug_query = drug_embedding.unsqueeze(1)  # (B, 1, D)
+
+        # Apply pocket mask if provided
+        if pocket_mask is not None:
+            # Convert binary mask to attention mask (True = ignore)
+            attn_mask = ~pocket_mask.bool()  # (B, L)
+        else:
+            attn_mask = None
+
+        # Cross-attention: drug attends to protein
+        attn_output, attn_weights = self.multihead_attn(
+            query=drug_query,
+            key=protein_embedding,
+            value=protein_embedding,
+            key_padding_mask=attn_mask
+        )
+
+        # Residual connection + layer norm
+        enhanced_drug_emb = self.layer_norm(drug_embedding + attn_output.squeeze(1))
+
+        return enhanced_drug_emb, attn_weights
+```
+
+#### Integration into DTA Model
+
+```python
+class CL_DTA_Plus_Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        # Encoders
+        self.drug_encoder = DrugEncoder(config)
+        self.protein_encoder = ProteinEncoder(config, return_sequence=True)  # Returns (B, L, D)
+
+        # Attention module (optional)
+        if config.attention.enabled:
+            self.attention = PocketGuidedAttention(
+                embed_dim=config.embedding_dim,
+                num_heads=config.attention.num_heads
+            )
+
+        # Prediction heads
+        if config.uncertainty.enabled:
+            self.prediction_head = EvidentialRegressionHead(config)
+        elif config.multitask.enabled:
+            self.prediction_head = MultiTaskHead(config)
+        else:
+            self.prediction_head = RegressionHead(config)
+
+    def forward(self, drug_tokens, prot_tokens, pocket_mask=None):
+        # Encode
+        drug_emb = self.drug_encoder(drug_tokens)              # (B, D)
+        prot_emb_seq = self.protein_encoder(prot_tokens)        # (B, L, D)
+        prot_emb_global = prot_emb_seq.mean(dim=1)             # (B, D)
+
+        # Apply attention if enabled
+        if hasattr(self, 'attention'):
+            drug_emb, attn_weights = self.attention(
+                drug_emb,
+                prot_emb_seq,
+                pocket_mask
+            )
+        else:
+            attn_weights = None
+
+        # Concatenate and predict
+        joint_emb = torch.cat([drug_emb, prot_emb_global], dim=-1)
+        output = self.prediction_head(joint_emb)
+
+        return output, attn_weights
+```
+
+#### Interpretability: Attention Visualization
+
+```python
+def visualize_attention(
+    attention_weights: torch.Tensor,  # (num_heads, 1, L)
+    protein_sequence: str,
+    output_path: str
+):
+    """
+    Generate heatmap showing which residues the model focuses on.
+    """
+    # Average over heads
+    avg_attn = attention_weights.mean(dim=0).squeeze(0).cpu().numpy()  # (L,)
+
+    # Plot
+    plt.figure(figsize=(20, 3))
+    plt.bar(range(len(protein_sequence)), avg_attn)
+    plt.xlabel('Residue Position')
+    plt.ylabel('Attention Weight')
+    plt.title(f'Attention Distribution over Protein Sequence')
+
+    # Annotate high-attention residues
+    top_k = 10
+    top_indices = np.argsort(avg_attn)[-top_k:]
+    for idx in top_indices:
+        plt.text(idx, avg_attn[idx], protein_sequence[idx], ha='center', va='bottom')
+
+    plt.savefig(output_path)
+```
+
+---
+
+## 12. Uncertainty Estimation — Evidential Regression
+
+### Evidential Deep Learning (Phase 7)
+
+**Motivation:** Deterministic predictions are unreliable in cold-start scenarios. Uncertainty quantification allows the model to admit when it doesn't know.
+
+#### Evidential Regression Head
+
+```python
+class EvidentialRegressionHead(nn.Module):
+    """
+    Outputs parameters of evidential distribution over predictions.
+
+    Outputs:
+        μ  : Predicted mean
+        v  : Data uncertainty (aleatoric)
+        α  : Evidence (α > 1)
+        β  : Inverse scale (β > 0)
+
+    Total uncertainty = aleatoric + epistemic:
+        σ² = β/(α-1) + β/(v*(α-1))
+    """
+
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 4)  # Output: μ, v, α, β
+        )
+
+    def forward(self, x):
+        outputs = self.fc(x)
+
+        # Split and apply constraints
+        mu = outputs[:, 0]                                # No constraint on mean
+        v = F.softplus(outputs[:, 1]) + 1e-6              # v > 0
+        alpha = F.softplus(outputs[:, 2]) + 1.0 + 1e-6    # α > 1
+        beta = F.softplus(outputs[:, 3]) + 1e-6           # β > 0
+
+        return mu, v, alpha, beta
+```
+
+#### Evidential Loss
+
+```python
+def evidential_loss(y_true, mu, v, alpha, beta, lambda_reg=0.1):
+    """
+    Evidential regression loss.
+
+    Components:
+        1. NLL term (fit to data)
+        2. Regularization term (penalize overconfidence on errors)
+    """
+    # NLL term
+    two_beta_lambda = 2 * beta * (1 + v)
+    nll = 0.5 * torch.log(np.pi / v) \
+          - alpha * torch.log(two_beta_lambda) \
+          + (alpha + 0.5) * torch.log(v * (y_true - mu)**2 + two_beta_lambda) \
+          + torch.lgamma(alpha) \
+          - torch.lgamma(alpha + 0.5)
+
+    # Regularization term (encourage high uncertainty on errors)
+    error = torch.abs(y_true - mu)
+    reg = error * (2 * v + alpha)
+
+    return (nll + lambda_reg * reg).mean()
+```
+
+#### Calibration Metrics
+
+```python
+def compute_calibration_metrics(predictions, uncertainties, targets):
+    """
+    Compute Expected Calibration Error (ECE) and coverage.
+
+    Args:
+        predictions: (N,) predicted means
+        uncertainties: (N,) predicted std devs
+        targets: (N,) true values
+    """
+    # Coverage: % of targets within predicted intervals
+    lower = predictions - 1.96 * uncertainties
+    upper = predictions + 1.96 * uncertainties
+    coverage = ((targets >= lower) & (targets <= upper)).float().mean()
+
+    # ECE: binned calibration error
+    n_bins = 10
+    bins = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+
+    for i in range(n_bins):
+        # Samples in this confidence bin
+        lower_bound = bins[i]
+        upper_bound = bins[i + 1]
+
+        in_bin = (uncertainties >= lower_bound) & (uncertainties < upper_bound)
+        if in_bin.sum() == 0:
+            continue
+
+        # Predicted confidence vs actual accuracy
+        predicted_conf = uncertainties[in_bin].mean()
+        actual_acc = ((targets[in_bin] >= predictions[in_bin] - 1.96 * uncertainties[in_bin]) &
+                      (targets[in_bin] <= predictions[in_bin] + 1.96 * uncertainties[in_bin])).float().mean()
+
+        ece += (predicted_conf - actual_acc).abs() * in_bin.sum() / len(predictions)
+
+    return {
+        'coverage': coverage.item(),
+        'ece': ece.item(),
+        'mean_uncertainty': uncertainties.mean().item()
+    }
+```
+
+#### Reliability Analysis
+
+```python
+def analyze_uncertainty_reliability(model, test_loader, train_embeddings):
+    """
+    Analyze correlation between uncertainty and prediction error.
+
+    Also compute distance from training distribution as reliability indicator.
+    """
+    predictions, uncertainties, errors, distances = [], [], [], []
+
+    for batch in test_loader:
+        with torch.no_grad():
+            mu, v, alpha, beta = model(batch)
+
+            # Compute uncertainty
+            uncertainty = np.sqrt(beta / (alpha - 1) + beta / (v * (alpha - 1)))
+
+            # Compute error
+            error = torch.abs(mu - batch['affinity'])
+
+            # Compute embedding distance from training set
+            test_emb = model.get_embedding(batch)
+            dist = torch.cdist(test_emb, train_embeddings).min(dim=-1)[0]
+
+            predictions.append(mu)
+            uncertainties.append(uncertainty)
+            errors.append(error)
+            distances.append(dist)
+
+    # Correlation analysis
+    uncertainty_error_corr = np.corrcoef(
+        torch.cat(uncertainties).cpu().numpy(),
+        torch.cat(errors).cpu().numpy()
+    )[0, 1]
+
+    distance_error_corr = np.corrcoef(
+        torch.cat(distances).cpu().numpy(),
+        torch.cat(errors).cpu().numpy()
+    )[0, 1]
+
+    return {
+        'uncertainty_error_correlation': uncertainty_error_corr,
+        'distance_error_correlation': distance_error_corr
+    }
+```
+
+---
+
+## 13. Multi-Task Learning Framework
+
+### Joint Training on Multiple Objectives (Phase 9)
+
+**Motivation:** Affinity, binary interaction, and mechanism of action are related tasks that can benefit from shared representations.
+
+#### Multi-Task Head Architecture
+
+```python
+class MultiTaskHead(nn.Module):
+    """
+    Three-branch prediction head for multi-task DTA.
+
+    Tasks:
+        1. Affinity regression (MSE loss)
+        2. Binary interaction (BCE loss)
+        3. Mechanism of action classification (CE loss)
+    """
+
+    def __init__(self, input_dim: int, num_moa_classes: int):
+        super().__init__()
+
+        # Shared layers
+        self.shared = nn.Sequential(
+            nn.Linear(input_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.2)
+        )
+
+        # Task-specific heads
+        self.affinity_head = nn.Sequential(
+            nn.Linear(512, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+
+        self.interaction_head = nn.Sequential(
+            nn.Linear(512, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+
+        self.moa_head = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_moa_classes)
+        )
+
+    def forward(self, x):
+        shared_features = self.shared(x)
+
+        affinity = self.affinity_head(shared_features).squeeze(-1)
+        interaction_prob = self.interaction_head(shared_features).squeeze(-1)
+        moa_logits = self.moa_head(shared_features)
+
+        return {
+            'affinity': affinity,
+            'interaction': interaction_prob,
+            'moa': moa_logits
+        }
+```
+
+#### Multi-Task Loss Function
+
+```python
+def compute_multitask_loss(outputs, targets, config):
+    """
+    Weighted combination of task-specific losses.
+
+    Supports missing labels via masking.
+    """
+    losses = {}
+
+    # Affinity loss (MSE)
+    if 'affinity' in targets and targets['affinity'] is not None:
+        losses['affinity'] = F.mse_loss(
+            outputs['affinity'],
+            targets['affinity']
+        ) * config.loss_weights['affinity']
+    else:
+        losses['affinity'] = 0.0
+
+    # Interaction loss (BCE)
+    if 'interaction' in targets and targets['interaction'] is not None:
+        losses['interaction'] = F.binary_cross_entropy(
+            outputs['interaction'],
+            targets['interaction']
+        ) * config.loss_weights['interaction']
+    else:
+        losses['interaction'] = 0.0
+
+    # MoA loss (CE)
+    if 'moa' in targets and targets['moa'] is not None:
+        losses['moa'] = F.cross_entropy(
+            outputs['moa'],
+            targets['moa']
+        ) * config.loss_weights['moa']
+    else:
+        losses['moa'] = 0.0
+
+    # Total loss
+    total_loss = sum(losses.values())
+
+    return total_loss, losses
+```
+
+#### Dynamic Loss Weighting (GradNorm)
+
+```python
+class GradNormWeighting:
+    """
+    Dynamically adjust task weights based on gradient magnitude ratios.
+
+    Reference: Chen et al. "GradNorm: Gradient Normalization for Adaptive Loss Balancing"
+    """
+
+    def __init__(self, num_tasks: int, alpha: float = 1.5):
+        self.num_tasks = num_tasks
+        self.alpha = alpha
+        self.initial_losses = None
+        self.weights = nn.Parameter(torch.ones(num_tasks))
+
+    def update_weights(self, task_losses, shared_params):
+        """
+        Update task weights based on relative training rates.
+        """
+        if self.initial_losses is None:
+            self.initial_losses = task_losses.detach()
+
+        # Compute relative inverse training rates
+        loss_ratios = task_losses / self.initial_losses
+        avg_loss_ratio = loss_ratios.mean()
+        relative_inverse_rates = loss_ratios / avg_loss_ratio
+
+        # Compute gradient norms
+        grad_norms = []
+        for i, loss in enumerate(task_losses):
+            grads = torch.autograd.grad(
+                self.weights[i] * loss,
+                shared_params,
+                retain_graph=True,
+                create_graph=True
+            )
+            grad_norm = torch.norm(torch.cat([g.flatten() for g in grads]))
+            grad_norms.append(grad_norm)
+
+        grad_norms = torch.stack(grad_norms)
+        avg_grad_norm = grad_norms.mean().detach()
+
+        # GradNorm loss
+        target_grad_norms = avg_grad_norm * (relative_inverse_rates ** self.alpha)
+        gradnorm_loss = torch.abs(grad_norms - target_grad_norms).sum()
+
+        return gradnorm_loss
+```
+
+#### Multi-Task Metrics Tracking
+
+```python
+def evaluate_multitask(model, dataloader, config):
+    """
+    Evaluate each task separately.
+    """
+    results = {task: [] for task in config.multitask.tasks}
+
+    for batch in dataloader:
+        outputs = model(batch)
+
+        # Affinity metrics
+        if 'affinity' in config.multitask.tasks:
+            mse = F.mse_loss(outputs['affinity'], batch['affinity']).item()
+            pearson = compute_pearson(outputs['affinity'], batch['affinity'])
+            results['affinity'].append({'mse': mse, 'pearson': pearson})
+
+        # Interaction metrics
+        if 'interaction' in config.multitask.tasks:
+            auroc = compute_auroc(outputs['interaction'], batch['interaction'])
+            auprc = compute_auprc(outputs['interaction'], batch['interaction'])
+            results['interaction'].append({'auroc': auroc, 'auprc': auprc})
+
+        # MoA metrics
+        if 'moa' in config.multitask.tasks:
+            acc = (outputs['moa'].argmax(dim=-1) == batch['moa']).float().mean().item()
+            f1 = compute_f1(outputs['moa'], batch['moa'])
+            results['moa'].append({'accuracy': acc, 'f1': f1})
+
+    # Aggregate
+    aggregated = {}
+    for task, metrics_list in results.items():
+        aggregated[task] = {
+            metric: np.mean([m[metric] for m in metrics_list])
+            for metric in metrics_list[0].keys()
+        }
+
+    return aggregated
+```
+
+---
+
+## 14. Interpretability & Theoretical Analysis
+
+### Visualization and Analysis Framework (Phase 8)
+
+#### UMAP/t-SNE Embedding Visualization
+
+```python
+def plot_embeddings_comparison(
+    embeddings_before: np.ndarray,
+    embeddings_after: np.ndarray,
+    labels: np.ndarray,
+    label_names: List[str],
+    output_path: str
+):
+    """
+    Visualize embedding space before and after contrastive learning.
+
+    Args:
+        embeddings_before: (N, D) embeddings from random initialization
+        embeddings_after: (N, D) embeddings after contrastive pretraining
+        labels: (N,) structural labels (e.g., protein family, drug scaffold)
+    """
+    import umap
+
+    # Fit UMAP
+    reducer_before = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+    reducer_after = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+
+    coords_before = reducer_before.fit_transform(embeddings_before)
+    coords_after = reducer_after.fit_transform(embeddings_after)
+
+    # Plot side-by-side
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    for label_id, label_name in enumerate(label_names):
+        mask = labels == label_id
+        ax1.scatter(coords_before[mask, 0], coords_before[mask, 1],
+                   label=label_name, alpha=0.6, s=20)
+        ax2.scatter(coords_after[mask, 0], coords_after[mask, 1],
+                   label=label_name, alpha=0.6, s=20)
+
+    ax1.set_title('Before Contrastive Learning')
+    ax2.set_title('After Contrastive Learning')
+    ax1.legend()
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+```
+
+#### Mutual Information Analysis
+
+```python
+def compute_mutual_information(embeddings: np.ndarray, structural_labels: np.ndarray) -> float:
+    """
+    Estimate mutual information between embeddings and structural labels.
+
+    Higher MI = embeddings capture more structural information.
+
+    Uses k-NN based estimator (Kraskov et al. 2004).
+    """
+    from sklearn.feature_selection import mutual_info_classif
+
+    mi = mutual_info_classif(
+        embeddings,
+        structural_labels,
+        discrete_features=False,
+        n_neighbors=5,
+        random_state=42
+    )
+
+    return mi.mean()
+
+
+def compare_mi_before_after(model, dataset, structural_labels):
+    """
+    Quantify information gain from contrastive learning.
+    """
+    # Get embeddings before contrastive learning (random init)
+    model.load_random_init()
+    emb_before = extract_embeddings(model, dataset)
+
+    # Get embeddings after contrastive learning
+    model.load_pretrained()
+    emb_after = extract_embeddings(model, dataset)
+
+    mi_before = compute_mutual_information(emb_before, structural_labels)
+    mi_after = compute_mutual_information(emb_after, structural_labels)
+
+    print(f"MI (before): {mi_before:.4f}")
+    print(f"MI (after): {mi_after:.4f}")
+    print(f"Improvement: {(mi_after - mi_before) / mi_before * 100:.2f}%")
+
+    return mi_before, mi_after
+```
+
+#### Intra-Class vs Inter-Class Similarity
+
+```python
+def analyze_embedding_similarity(embeddings, labels):
+    """
+    Measure:
+        - Intra-class similarity (should increase after contrastive learning)
+        - Inter-class similarity (should decrease after contrastive learning)
+    """
+    # Normalize embeddings
+    embeddings = F.normalize(torch.from_numpy(embeddings), p=2, dim=-1).numpy()
+
+    intra_class_sims = []
+    inter_class_sims = []
+
+    unique_labels = np.unique(labels)
+
+    for label_i in unique_labels:
+        mask_i = labels == label_i
+        emb_i = embeddings[mask_i]
+
+        # Intra-class similarity (within same label)
+        if len(emb_i) > 1:
+            sim_matrix = emb_i @ emb_i.T
+            # Exclude diagonal (self-similarity)
+            intra_sim = (sim_matrix.sum() - np.trace(sim_matrix)) / (len(emb_i) * (len(emb_i) - 1))
+            intra_class_sims.append(intra_sim)
+
+        # Inter-class similarity (with other labels)
+        for label_j in unique_labels:
+            if label_j <= label_i:
+                continue
+            mask_j = labels == label_j
+            emb_j = embeddings[mask_j]
+
+            sim_matrix = emb_i @ emb_j.T
+            inter_sim = sim_matrix.mean()
+            inter_class_sims.append(inter_sim)
+
+    return {
+        'intra_class_similarity': np.mean(intra_class_sims),
+        'inter_class_similarity': np.mean(inter_class_sims),
+        'separation_ratio': np.mean(intra_class_sims) / np.mean(inter_class_sims)
+    }
+```
+
+#### Attention Heatmap Analysis
+
+```python
+def visualize_attention_vs_binding_site(
+    attention_weights: np.ndarray,  # (L,)
+    protein_sequence: str,
+    known_binding_sites: List[Tuple[int, int]],  # List of (start, end) tuples
+    output_path: str
+):
+    """
+    Compare model attention with known binding sites.
+
+    Validates whether attention focuses on biologically relevant regions.
+    """
+    fig, ax = plt.subplots(figsize=(20, 4))
+
+    # Plot attention weights
+    ax.bar(range(len(attention_weights)), attention_weights, color='steelblue', alpha=0.7, label='Attention')
+
+    # Highlight known binding sites
+    for start, end in known_binding_sites:
+        ax.axvspan(start, end, alpha=0.3, color='red', label='Known Binding Site' if start == known_binding_sites[0][0] else '')
+
+    ax.set_xlabel('Residue Position')
+    ax.set_ylabel('Attention Weight')
+    ax.set_title('Attention Distribution vs Known Binding Sites')
+    ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+
+    # Compute overlap score
+    binding_mask = np.zeros(len(protein_sequence))
+    for start, end in known_binding_sites:
+        binding_mask[start:end] = 1
+
+    # Correlation between attention and binding site indicator
+    overlap_score = np.corrcoef(attention_weights, binding_mask)[0, 1]
+
+    return overlap_score
+```
+
+#### Collapse Detection
+
+```python
+def detect_representation_collapse(embeddings: np.ndarray) -> Dict[str, float]:
+    """
+    Check if contrastive learning has collapsed to trivial solution.
+
+    Indicators of collapse:
+        - Low variance
+        - All embeddings converge to single point
+        - Uniform cosine similarity
+    """
+    # Normalize
+    embeddings = F.normalize(torch.from_numpy(embeddings), p=2, dim=-1).numpy()
+
+    # Compute variance per dimension
+    dim_variance = embeddings.var(axis=0)
+    mean_variance = dim_variance.mean()
+
+    # Compute pairwise cosine similarities
+    sim_matrix = embeddings @ embeddings.T
+    # Exclude diagonal
+    n = len(embeddings)
+    off_diag_sim = (sim_matrix.sum() - np.trace(sim_matrix)) / (n * (n - 1))
+
+    # Effective rank (number of significant singular values)
+    _, s, _ = np.linalg.svd(embeddings - embeddings.mean(axis=0))
+    effective_rank = (s.sum() ** 2) / (s ** 2).sum()
+
+    return {
+        'mean_variance': mean_variance,
+        'mean_pairwise_similarity': off_diag_sim,
+        'effective_rank': effective_rank,
+        'total_dims': embeddings.shape[1],
+        'collapsed': (mean_variance < 0.01) or (off_diag_sim > 0.95)
+    }
 ```
 
 ---
