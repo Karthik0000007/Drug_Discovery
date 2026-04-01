@@ -71,12 +71,12 @@ The core hypothesis: **Cross-modal contrastive pretraining + pretrained biologic
 flowchart TB
     subgraph DataLayer ["Data Layer"]
         RAW[Raw Datasets\nDAVIS · KIBA]
-        PREP[Preprocessing\npreprocess.py]
+        PREP["Preprocessing<br/>preprocess.py"]
         CSV[Processed CSVs\ndrug_id · target_id · smiles · sequence · affinity]
     end
 
     subgraph SplitLayer ["Split Layer"]
-        SPLIT[Data Splitter\ndata_loading.py]
+        SPLIT["Data Splitter<br/>data_loading.py"]
         RAND[Random Split]
         CD[Cold-Drug Split]
         CT[Cold-Target Split]
@@ -86,18 +86,18 @@ flowchart TB
     subgraph PretrainPhase ["Phase 1 — Contrastive Pretraining"]
         AUG_D[Drug Augmentations\nSMILES Enumeration\nAtom Masking\nSubstructure Dropout]
         AUG_P[Protein Augmentations\nSubsequence Cropping\nResidue Masking\nResidue Substitution]
-        CDSET[ContrastiveDataset\nPositive Pair Generation]
+        CDSET["ContrastiveDataset<br/>Positive Pair Generation"]
         DRUG_ENC[Drug CNN Encoder\n3×Conv1D + AdaptiveMaxPool]
         PROT_ENC[Protein CNN Encoder\n3×Conv1D + AdaptiveMaxPool]
         PROJ_D[Drug Projection Head\nMLP → ℓ₂-normalize]
         PROJ_P[Protein Projection Head\nMLP → ℓ₂-normalize]
         LOSS_CL[NT-Xent / InfoNCE\nContrastive Loss]
-        CROSS[Cross-Modal\nAlignment Loss\n(Optional)]
+        CROSS["Cross-Modal<br/>Alignment Loss<br/>Optional"]
     end
 
     subgraph FinetunePhase ["Phase 2 — Supervised Fine-Tuning"]
-        LOAD[Load Pretrained\nEncoder Weights]
-        DTA_MODEL[DeepDTA Model\nDrug CNN + Protein CNN + FC Head]
+        LOAD["Load Pretrained<br/>Encoder Weights"]
+        DTA_MODEL["DeepDTA Model<br/>Drug CNN + Protein CNN + FC Head"]
         MSE_LOSS[MSE Regression Loss]
         EVAL[Evaluation\nMSE · CI · Pearson · Spearman · r²ₘ]
     end
