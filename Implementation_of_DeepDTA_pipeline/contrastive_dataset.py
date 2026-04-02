@@ -112,7 +112,11 @@ class ContrastiveProteinDataset(Dataset):
 class ContrastiveCrossModalDataset(Dataset):
     """
     Cross-modal contrastive dataset for known drug–target pairs.
-    Returns augmented drug view + augmented protein view for the same pair.
+    
+    Phase 1 Enhanced: Returns TWO augmented views for EACH modality:
+    - drug_view1, drug_view2 (for intra-modal drug contrastive loss)
+    - prot_view1, prot_view2 (for intra-modal protein contrastive loss)
+    - All views are from the same binding pair (aligned indices for cross-modal loss)
     """
 
     def __init__(
@@ -151,18 +155,32 @@ class ContrastiveCrossModalDataset(Dataset):
         smiles = row["smiles"]
         sequence = row["sequence"]
 
-        drug_view = apply_random_augmentation(
+        # Generate two independent augmented views for drug
+        drug_view1 = apply_random_augmentation(
             smiles, self.drug_aug_names, DRUG_AUGMENTATION_REGISTRY, **self.drug_kwargs
         )
-        prot_view = apply_random_augmentation(
+        drug_view2 = apply_random_augmentation(
+            smiles, self.drug_aug_names, DRUG_AUGMENTATION_REGISTRY, **self.drug_kwargs
+        )
+        
+        # Generate two independent augmented views for protein
+        prot_view1 = apply_random_augmentation(
+            sequence, self.prot_aug_names, PROTEIN_AUGMENTATION_REGISTRY, **self.prot_kwargs
+        )
+        prot_view2 = apply_random_augmentation(
             sequence, self.prot_aug_names, PROTEIN_AUGMENTATION_REGISTRY, **self.prot_kwargs
         )
 
-        d_ids = tokenize_seq(drug_view, self.sml_stoi, self.max_sml_len)
-        p_ids = tokenize_seq(prot_view, self.prot_stoi, self.max_prot_len)
+        # Tokenize all views
+        d1_ids = tokenize_seq(drug_view1, self.sml_stoi, self.max_sml_len)
+        d2_ids = tokenize_seq(drug_view2, self.sml_stoi, self.max_sml_len)
+        p1_ids = tokenize_seq(prot_view1, self.prot_stoi, self.max_prot_len)
+        p2_ids = tokenize_seq(prot_view2, self.prot_stoi, self.max_prot_len)
 
         return {
-            "drug_view": torch.LongTensor(d_ids),
-            "prot_view": torch.LongTensor(p_ids),
+            "drug_view1": torch.LongTensor(d1_ids),
+            "drug_view2": torch.LongTensor(d2_ids),
+            "prot_view1": torch.LongTensor(p1_ids),
+            "prot_view2": torch.LongTensor(p2_ids),
             "index": idx,
         }

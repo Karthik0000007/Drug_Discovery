@@ -135,10 +135,10 @@ def pretrain_encoder(
 
 
 # ──────────────────────────────────────────────
-# Cross-modal pretraining
+# Phase 1: Enhanced cross-modal pretraining with alignment loss
 # ──────────────────────────────────────────────
 
-def pretrain_cross_modal(
+def pretrain_cross_modal_enhanced(
     drug_encoder: DrugEncoder,
     prot_encoder: ProteinEncoder,
     drug_proj: ProjectionHead,
@@ -149,11 +149,24 @@ def pretrain_cross_modal(
     scheduler,
     device: torch.device,
     epochs: int,
+    temperature: float = 0.07,
+    align_loss_weight: float = 0.5,
     tb_writer: SummaryWriter | None = None,
     save_dir: str = "checkpoints/pretrained/",
     save_every: int = 25,
 ) -> float:
-    """Cross-modal alignment: align drug–protein representations."""
+    """
+    Enhanced cross-modal pretraining with combined intra-modal + cross-modal alignment.
+    
+    Computes:
+    1. Drug intra-modal contrastive loss (drug_view1 vs drug_view2)
+    2. Protein intra-modal contrastive loss (prot_view1 vs prot_view2)
+    3. Cross-modal alignment loss (paired drug-protein embeddings)
+    
+    Total loss = loss_drug + loss_protein + align_loss_weight * loss_align
+    """
+    from .contrastive_losses import compute_contrastive_losses
+    
     os.makedirs(save_dir, exist_ok=True)
     drug_encoder.to(device)
     prot_encoder.to(device)
@@ -166,19 +179,51 @@ def pretrain_cross_modal(
         prot_encoder.train()
         drug_proj.train()
         prot_proj.train()
+        
         total_loss = 0.0
+        total_drug_loss = 0.0
+        total_prot_loss = 0.0
+        total_align_loss = 0.0
         n_batches = 0
 
         for batch in dataloader:
-            d = batch["drug_view"].to(device)
-            p = batch["prot_view"].to(device)
+            # Batch contains: drug_view1, drug_view2, prot_view1, prot_view2
+            # All views are from the same binding pairs (aligned indices)
+            d1 = batch["drug_view1"].to(device)
+            d2 = batch["drug_view2"].to(device)
+            p1 = batch["prot_view1"].to(device)
+            p2 = batch["prot_view2"].to(device)
 
-            hd = drug_encoder(d)
-            hp = prot_encoder(p)
-            zd = drug_proj(hd)
-            zp = prot_proj(hp)
+            # Encode all views
+            hd1 = drug_encoder(d1)
+            hd2 = drug_encoder(d2)
+            hp1 = prot_encoder(p1)
+            hp2 = prot_encoder(p2)
+            
+            # Project to contrastive space
+            zd1 = drug_proj(hd1)
+            zd2 = drug_proj(hd2)
+            zp1 = prot_proj(hp1)
+            zp2 = prot_proj(hp2)
+            
+            # Use first view for cross-modal alignment (could also average)
+            paired_drug = zd1
+            paired_prot = zp1
 
-            loss = loss_fn(zd, zp)
+            # Compute combined losses
+            losses = compute_contrastive_losses(
+                drug_view1=zd1,
+                drug_view2=zd2,
+                prot_view1=zp1,
+                prot_view2=zp2,
+                paired_drug_emb=paired_drug,
+                paired_prot_emb=paired_prot,
+                temperature=temperature,
+                align_loss_weight=align_loss_weight,
+                loss_fn_name="nt_xent",  # Use NT-Xent for all components
+            )
+
+            loss = losses["loss_total"]
 
             optimizer.zero_grad()
             loss.backward()
@@ -190,19 +235,31 @@ def pretrain_cross_modal(
             optimizer.step()
 
             total_loss += loss.item()
+            total_drug_loss += losses["loss_drug"].item()
+            total_prot_loss += losses["loss_protein"].item()
+            total_align_loss += losses["loss_align"].item()
             n_batches += 1
 
         avg_loss = total_loss / max(n_batches, 1)
+        avg_drug_loss = total_drug_loss / max(n_batches, 1)
+        avg_prot_loss = total_prot_loss / max(n_batches, 1)
+        avg_align_loss = total_align_loss / max(n_batches, 1)
+        
         if scheduler is not None:
             scheduler.step()
 
         if tb_writer is not None:
-            tb_writer.add_scalar("pretrain/cross_modal_loss", avg_loss, epoch)
+            tb_writer.add_scalar("pretrain/total_loss", avg_loss, epoch)
+            tb_writer.add_scalar("pretrain/drug_loss", avg_drug_loss, epoch)
+            tb_writer.add_scalar("pretrain/protein_loss", avg_prot_loss, epoch)
+            tb_writer.add_scalar("pretrain/align_loss", avg_align_loss, epoch)
+            tb_writer.add_scalar("pretrain/lr", optimizer.param_groups[0]["lr"], epoch)
 
         if epoch % 10 == 0 or epoch == 1:
             print(
                 f"[Pretrain cross-modal] Epoch {epoch}/{epochs}  "
-                f"Loss: {avg_loss:.4f}"
+                f"Total: {avg_loss:.4f}  Drug: {avg_drug_loss:.4f}  "
+                f"Prot: {avg_prot_loss:.4f}  Align: {avg_align_loss:.4f}"
             )
 
         if avg_loss < best_loss:
@@ -228,13 +285,15 @@ def pretrain_cross_modal(
 
 def run_pretraining(
     df: pd.DataFrame,
-    mode: str = "both_independent",
+    mode: str = "cross_modal",
     epochs: int = 100,
     batch_size: int = 256,
     lr: float = 5e-4,
     weight_decay: float = 1e-5,
     temperature: float = 0.07,
     loss_name: str = "nt_xent",
+    use_cross_modal: bool = True,
+    align_loss_weight: float = 0.5,
     drug_aug_names: list | None = None,
     prot_aug_names: list | None = None,
     mask_ratio: float = 0.15,
@@ -252,7 +311,7 @@ def run_pretraining(
     seed: int = 42,
 ) -> dict:
     """
-    High-level pretraining entry point.
+    High-level pretraining entry point with Phase 1 enhancements.
 
     Returns dict with paths to saved encoder checkpoints.
     """
@@ -330,9 +389,11 @@ def run_pretraining(
         )
         results["prot_ckpt"] = os.path.join(save_dir, "prot_encoder.pt")
 
-    # ── Cross-modal pretraining ──
+    # ── Cross-modal pretraining (Phase 1 enhanced) ──
     if mode == "cross_modal":
-        print("\n=== Cross-Modal Pretraining ===")
+        print("\n=== Cross-Modal Pretraining (Phase 1 Enhanced) ===")
+        print(f"Using align_loss_weight = {align_loss_weight}")
+        
         cm_ds = ContrastiveCrossModalDataset(
             df, sml_stoi, prot_stoi, max_sml_len, max_prot_len,
             drug_aug_names=drug_aug_names, prot_aug_names=prot_aug_names,
@@ -356,10 +417,12 @@ def run_pretraining(
         cm_opt = torch.optim.AdamW(all_params, lr=lr, weight_decay=weight_decay)
         cm_sched = torch.optim.lr_scheduler.CosineAnnealingLR(cm_opt, T_max=epochs)
 
-        pretrain_cross_modal(
+        pretrain_cross_modal_enhanced(
             drug_enc, prot_enc, drug_proj, prot_proj,
             cm_loader, loss_fn, cm_opt, cm_sched,
-            device, epochs, tb_writer, save_dir=save_dir,
+            device, epochs, temperature=temperature,
+            align_loss_weight=align_loss_weight,
+            tb_writer=tb_writer, save_dir=save_dir,
         )
         results["drug_ckpt"] = os.path.join(save_dir, "drug_encoder.pt")
         results["prot_ckpt"] = os.path.join(save_dir, "prot_encoder.pt")

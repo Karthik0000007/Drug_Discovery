@@ -24,22 +24,32 @@ class DataConfig:
     data_path: str = "data/"
     max_sml_len: int = 120
     max_prot_len: int = 1000
-    split: str = "random"                      # 'random' | 'cold_drug' | 'cold_target' | 'cold_both'
+    split: str = "random"                      # 'random' | 'cold_drug' | 'cold_target' | 'cold_both' | 'cold_pharos'
     test_frac: float = 0.1
     val_frac: float = 0.1
-    n_folds: int = 5                           # For k-fold CV on cold splits
+    n_folds: int = 5                           # For k-fold entity-group CV on cold splits
+    
+    # Phase 2: Leakage verification and edge case handling
+    verify_no_leakage: bool = True             # Programmatic leakage verification
+    min_samples_threshold: int = 100           # Minimum samples per split
+    max_retry_attempts: int = 5                # Retry split if constraints violated
 
 
 @dataclass
 class PretrainConfig:
     """Contrastive pretraining configuration."""
     enabled: bool = True
-    mode: str = "both_independent"             # 'drug_only' | 'prot_only' | 'both_independent' | 'cross_modal'
+    mode: str = "cross_modal"                  # 'drug_only' | 'prot_only' | 'both_independent' | 'cross_modal'
     epochs: int = 100
     batch_size: int = 256
     lr: float = 5e-4
     temperature: float = 0.07
     loss: str = "nt_xent"                      # 'nt_xent' | 'infonce' | 'triplet'
+    
+    # Cross-modal alignment (Phase 1)
+    use_cross_modal: bool = True               # Enable cross-modal alignment loss
+    align_loss_weight: float = 0.5             # Weight for cross-modal alignment loss (0.1-1.0)
+    
     drug_augmentations: List[str] = field(
         default_factory=lambda: ["smiles_enum", "atom_mask"]
     )

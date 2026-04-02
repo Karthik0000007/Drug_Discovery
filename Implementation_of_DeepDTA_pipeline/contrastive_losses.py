@@ -118,6 +118,120 @@ class TripletLoss(nn.Module):
 
 
 # ──────────────────────────────────────────────
+# Phase 1: Cross-Modal Alignment Loss
+# ──────────────────────────────────────────────
+
+def cross_modal_alignment_loss(
+    drug_embeddings: torch.Tensor,
+    protein_embeddings: torch.Tensor,
+    temperature: float = 0.07,
+) -> torch.Tensor:
+    """
+    Cross-modal alignment loss for drug-protein binding pairs.
+    
+    Applies NT-Xent-style contrastive loss across modalities where:
+    - Positive pairs: (drug_i, protein_i) — known binding pairs (diagonal)
+    - Negative pairs: all other (drug_i, protein_j) combinations in batch
+    
+    Parameters
+    ----------
+    drug_embeddings : (B, D) ℓ₂-normalized drug projection vectors
+    protein_embeddings : (B, D) ℓ₂-normalized protein projection vectors
+    temperature : temperature parameter for scaling similarities
+    
+    Returns
+    -------
+    Scalar cross-modal alignment loss
+    
+    Notes
+    -----
+    Each index i corresponds to a known binding pair (drug_i, protein_i).
+    The loss encourages binding pairs to have high similarity while
+    pushing apart non-binding combinations.
+    """
+    B = drug_embeddings.size(0)
+    
+    # Normalize embeddings (ensure unit norm)
+    drug_embeddings = F.normalize(drug_embeddings, p=2, dim=1)
+    protein_embeddings = F.normalize(protein_embeddings, p=2, dim=1)
+    
+    # Compute similarity matrix: (B, B)
+    # sim[i, j] = cosine_similarity(drug_i, protein_j)
+    sim_matrix = torch.mm(drug_embeddings, protein_embeddings.t()) / temperature
+    
+    # Positive pairs are on the diagonal
+    # Labels for cross-entropy: each drug_i should match protein_i
+    labels = torch.arange(B, device=drug_embeddings.device)
+    
+    # Compute loss in both directions (drug→protein and protein→drug)
+    # This is symmetric and ensures both modalities learn aligned representations
+    loss_d2p = F.cross_entropy(sim_matrix, labels)  # drug as query, protein as key
+    loss_p2d = F.cross_entropy(sim_matrix.t(), labels)  # protein as query, drug as key
+    
+    # Average bidirectional loss
+    loss = (loss_d2p + loss_p2d) / 2.0
+    
+    return loss
+
+
+def compute_contrastive_losses(
+    drug_view1: torch.Tensor,
+    drug_view2: torch.Tensor,
+    prot_view1: torch.Tensor,
+    prot_view2: torch.Tensor,
+    paired_drug_emb: torch.Tensor,
+    paired_prot_emb: torch.Tensor,
+    temperature: float = 0.07,
+    align_loss_weight: float = 0.5,
+    loss_fn_name: str = "nt_xent",
+) -> dict:
+    """
+    Unified contrastive loss computation for cross-modal pretraining.
+    
+    Computes:
+    1. Intra-modal drug loss (drug_view1 vs drug_view2)
+    2. Intra-modal protein loss (prot_view1 vs prot_view2)
+    3. Cross-modal alignment loss (paired drug-protein embeddings)
+    
+    Parameters
+    ----------
+    drug_view1, drug_view2 : (B, D) drug augmentation views
+    prot_view1, prot_view2 : (B, D) protein augmentation views
+    paired_drug_emb : (B, D) drug embeddings for binding pairs
+    paired_prot_emb : (B, D) protein embeddings for binding pairs
+    temperature : temperature for contrastive losses
+    align_loss_weight : weight for cross-modal alignment loss
+    loss_fn_name : 'nt_xent' | 'infonce' | 'triplet'
+    
+    Returns
+    -------
+    dict with keys: 'loss_drug', 'loss_protein', 'loss_align', 'loss_total'
+    """
+    # Get intra-modal loss function
+    loss_kwargs = {"temperature": temperature} if loss_fn_name != "triplet" else {"margin": 1.0}
+    intra_loss_fn = get_contrastive_loss(loss_fn_name, **loss_kwargs)
+    
+    # Compute intra-modal losses
+    loss_drug = intra_loss_fn(drug_view1, drug_view2)
+    loss_protein = intra_loss_fn(prot_view1, prot_view2)
+    
+    # Compute cross-modal alignment loss
+    loss_align = cross_modal_alignment_loss(
+        paired_drug_emb, paired_prot_emb, temperature=temperature
+    )
+    
+    # Combined loss
+    loss_total = loss_drug + loss_protein + align_loss_weight * loss_align
+    
+    return {
+        "loss_drug": loss_drug,
+        "loss_protein": loss_protein,
+        "loss_align": loss_align,
+        "loss_total": loss_total,
+    }
+
+
+# ──────────────────────────────────────────────
 # Factory
 # ──────────────────────────────────────────────
 
