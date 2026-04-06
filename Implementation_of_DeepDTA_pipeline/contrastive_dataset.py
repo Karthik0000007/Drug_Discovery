@@ -1,14 +1,14 @@
 """
-contrastive_dataset.py — ContrastiveDataset for positive pair generation.
+contrastive_dataset.py — Contrastive datasets with Phase 4 pretrained tokenizer support.
 
-For each sample, two independent augmentations are applied to produce views
-(x_i, x_i^+). Negative pairs come from other samples in the minibatch
-(NT-Xent style — no explicit negative sampling).
+Adds:
+  - Raw augmented text for LLM alignment
+  - Optional Hugging Face tokenization with caching
 """
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Any
 
 import pandas as pd
 import torch
@@ -19,7 +19,7 @@ from .augmentations import (
     DRUG_AUGMENTATION_REGISTRY,
     PROTEIN_AUGMENTATION_REGISTRY,
 )
-from .tokenizers_and_datasets import tokenize_seq
+from .tokenizers_and_datasets import tokenize_seq, maybe_tokenize_hf
 
 
 class ContrastiveDrugDataset(Dataset):
@@ -36,12 +36,16 @@ class ContrastiveDrugDataset(Dataset):
         aug_names: List[str] | None = None,
         mask_ratio: float = 0.15,
         drop_prob: float = 0.1,
+        use_pretrained_tokenizer: bool = False,
+        tokenizer: Optional[Any] = None,
     ):
         self.smiles_list = smiles_list
         self.stoi = stoi
         self.max_len = max_len
         self.aug_names = aug_names or ["smiles_enum", "atom_mask"]
         self.aug_kwargs = {"mask_ratio": mask_ratio, "drop_prob": drop_prob}
+        self.use_pretrained_tokenizer = use_pretrained_tokenizer or tokenizer is not None
+        self.tokenizer = tokenizer
 
     def __len__(self) -> int:
         return len(self.smiles_list)
@@ -56,11 +60,20 @@ class ContrastiveDrugDataset(Dataset):
         )
         v1_ids = tokenize_seq(view1, self.stoi, self.max_len)
         v2_ids = tokenize_seq(view2, self.stoi, self.max_len)
-        return {
+
+        sample = {
             "view1": torch.LongTensor(v1_ids),
             "view2": torch.LongTensor(v2_ids),
             "index": idx,
+            "view1_text": view1,
+            "view2_text": view2,
         }
+
+        if self.use_pretrained_tokenizer:
+            sample["view1_tokens"] = maybe_tokenize_hf(view1, self.tokenizer)
+            sample["view2_tokens"] = maybe_tokenize_hf(view2, self.tokenizer)
+
+        return sample
 
 
 class ContrastiveProteinDataset(Dataset):
@@ -78,6 +91,8 @@ class ContrastiveProteinDataset(Dataset):
         mask_ratio: float = 0.15,
         crop_min_ratio: float = 0.7,
         sub_ratio: float = 0.10,
+        use_pretrained_tokenizer: bool = False,
+        tokenizer: Optional[Any] = None,
     ):
         self.sequences = sequences
         self.stoi = stoi
@@ -88,25 +103,36 @@ class ContrastiveProteinDataset(Dataset):
             "min_ratio": crop_min_ratio,
             "sub_ratio": sub_ratio,
         }
+        self.use_pretrained_tokenizer = use_pretrained_tokenizer or tokenizer is not None
+        self.tokenizer = tokenizer
 
     def __len__(self) -> int:
         return len(self.sequences)
 
     def __getitem__(self, idx: int):
         original = self.sequences[idx]
-        view1 = apply_random_augmentation(
+        prot_view1 = apply_random_augmentation(
             original, self.aug_names, PROTEIN_AUGMENTATION_REGISTRY, **self.aug_kwargs
         )
-        view2 = apply_random_augmentation(
+        prot_view2 = apply_random_augmentation(
             original, self.aug_names, PROTEIN_AUGMENTATION_REGISTRY, **self.aug_kwargs
         )
-        v1_ids = tokenize_seq(view1, self.stoi, self.max_len)
-        v2_ids = tokenize_seq(view2, self.stoi, self.max_len)
-        return {
+        v1_ids = tokenize_seq(prot_view1, self.stoi, self.max_len)
+        v2_ids = tokenize_seq(prot_view2, self.stoi, self.max_len)
+
+        sample = {
             "view1": torch.LongTensor(v1_ids),
             "view2": torch.LongTensor(v2_ids),
             "index": idx,
+            "view1_text": prot_view1,
+            "view2_text": prot_view2,
         }
+
+        if self.use_pretrained_tokenizer:
+            sample["view1_tokens"] = maybe_tokenize_hf(prot_view1, self.tokenizer)
+            sample["view2_tokens"] = maybe_tokenize_hf(prot_view2, self.tokenizer)
+
+        return sample
 
 
 class ContrastiveCrossModalDataset(Dataset):
@@ -132,6 +158,9 @@ class ContrastiveCrossModalDataset(Dataset):
         drop_prob: float = 0.1,
         crop_min_ratio: float = 0.7,
         sub_ratio: float = 0.10,
+        use_pretrained_tokenizers: bool = False,
+        drug_tokenizer: Optional[Any] = None,
+        prot_tokenizer: Optional[Any] = None,
     ):
         self.df = df.reset_index(drop=True)
         self.sml_stoi = sml_stoi
@@ -146,6 +175,9 @@ class ContrastiveCrossModalDataset(Dataset):
             "min_ratio": crop_min_ratio,
             "sub_ratio": sub_ratio,
         }
+        self.use_pretrained_tokenizers = use_pretrained_tokenizers or (drug_tokenizer is not None) or (prot_tokenizer is not None)
+        self.drug_tokenizer = drug_tokenizer
+        self.prot_tokenizer = prot_tokenizer
 
     def __len__(self) -> int:
         return len(self.df)
@@ -171,16 +203,29 @@ class ContrastiveCrossModalDataset(Dataset):
             sequence, self.prot_aug_names, PROTEIN_AUGMENTATION_REGISTRY, **self.prot_kwargs
         )
 
-        # Tokenize all views
+        # Tokenize all views (character-level baseline)
         d1_ids = tokenize_seq(drug_view1, self.sml_stoi, self.max_sml_len)
         d2_ids = tokenize_seq(drug_view2, self.sml_stoi, self.max_sml_len)
         p1_ids = tokenize_seq(prot_view1, self.prot_stoi, self.max_prot_len)
         p2_ids = tokenize_seq(prot_view2, self.prot_stoi, self.max_prot_len)
 
-        return {
+        sample = {
             "drug_view1": torch.LongTensor(d1_ids),
             "drug_view2": torch.LongTensor(d2_ids),
             "prot_view1": torch.LongTensor(p1_ids),
             "prot_view2": torch.LongTensor(p2_ids),
             "index": idx,
+            # Raw augmented text (needed for LLM alignment and caching)
+            "drug_view1_text": drug_view1,
+            "drug_view2_text": drug_view2,
+            "prot_view1_text": prot_view1,
+            "prot_view2_text": prot_view2,
         }
+
+        if self.use_pretrained_tokenizers:
+            sample["drug_view1_tokens"] = maybe_tokenize_hf(drug_view1, self.drug_tokenizer)
+            sample["drug_view2_tokens"] = maybe_tokenize_hf(drug_view2, self.drug_tokenizer)
+            sample["prot_view1_tokens"] = maybe_tokenize_hf(prot_view1, self.prot_tokenizer)
+            sample["prot_view2_tokens"] = maybe_tokenize_hf(prot_view2, self.prot_tokenizer)
+
+        return sample
