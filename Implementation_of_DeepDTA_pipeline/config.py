@@ -45,11 +45,23 @@ class PretrainConfig:
     lr: float = 5e-4
     temperature: float = 0.07
     loss: str = "nt_xent"                      # 'nt_xent' | 'infonce' | 'triplet'
-    
+
     # Cross-modal alignment (Phase 1)
     use_cross_modal: bool = True               # Enable cross-modal alignment loss
     align_loss_weight: float = 0.5             # Weight for cross-modal alignment loss (0.1-1.0)
-    
+
+    # Phase 4: Pretrained Models (LLM Integration)
+    use_pretrained_embeddings: bool = False    # Enable pretrained LLM embeddings
+    pretrained_drug_model: Optional[str] = None  # 'chemberta' | 'molformer' | None
+    pretrained_prot_model: Optional[str] = None  # 'esm2_t33' | 'esm2_t6' | 'protbert' | None
+    freeze_pretrained: bool = True             # Freeze pretrained model weights
+    unfreeze_last_k_layers: int = 0            # Number of final layers to unfreeze (0 = keep frozen)
+    cache_llm_embeddings: bool = True          # Cache pretrained embeddings to avoid recomputation
+    embedding_alignment_weight: float = 0.3    # Weight for LLM↔learned embedding alignment loss
+
+    # Phase 4: Tokenization
+    use_pretrained_tokenizers: bool = False    # Use Hugging Face tokenizers (auto-enabled if using pretrained models)
+
     drug_augmentations: List[str] = field(
         default_factory=lambda: ["smiles_enum", "atom_mask"]
     )
@@ -81,6 +93,37 @@ class TrainConfig:
     unfreeze_after: int = 5                    # epochs for gradual unfreeze
 
 
+@dataclass
+class MetaLearningConfig:
+    """Phase 5: Meta-learning configuration for few-shot DTA."""
+    enabled: bool = False                      # Enable meta-learning training
+
+    # Inner loop (task-specific adaptation)
+    num_inner_steps: int = 3                   # Number of gradient steps on support set
+    inner_lr: float = 1e-3                     # Learning rate for inner loop adaptation
+
+    # Outer loop (meta-update)
+    meta_lr: float = 1e-4                      # Learning rate for meta-update
+    meta_batch_size: int = 4                   # Number of tasks per meta-batch
+
+    # Adaptation scope
+    adaptation_scope: str = "head_only"        # 'head_only' | 'partial_encoder' | 'full'
+    unfreeze_layers: int = 2                   # For partial_encoder: num layers to unfreeze
+
+    # Task sampling
+    task_type: str = "mixed"                   # 'cold_drug' | 'cold_target' | 'cold_both' | 'mixed'
+    k_support: int = 5                         # Support set size (few-shot)
+    k_query: int = 10                          # Query set size
+
+    # Efficiency
+    use_functional_model: bool = True          # Use higher library for efficient MAML
+    cache_task_embeddings: bool = False        # Cache embeddings per task
+
+    # Training
+    meta_epochs: int = 10                      # Number of meta-training epochs
+    checkpoint_dir: str = "checkpoints/meta_learning/"
+
+
 # ──────────────────────────────────────────────
 # Top-level experiment config
 # ──────────────────────────────────────────────
@@ -91,6 +134,7 @@ class ExperimentConfig:
     data: DataConfig = field(default_factory=DataConfig)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    meta_learning: MetaLearningConfig = field(default_factory=MetaLearningConfig)
     model: str = "cl_dta"                      # 'deepdta' | 'graphdta' | 'widedta' | 'attndta' | 'cl_dta'
     seed: int = 42
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
@@ -127,8 +171,9 @@ def load_config(yaml_path: str) -> ExperimentConfig:
     data_cfg = DataConfig(**raw.get("data", {}))
     pretrain_cfg = PretrainConfig(**raw.get("pretrain", {}))
     train_cfg = TrainConfig(**raw.get("train", {}))
+    meta_learning_cfg = MetaLearningConfig(**raw.get("meta_learning", {}))
 
-    top = {k: v for k, v in raw.items() if k not in ("data", "pretrain", "train")}
+    top = {k: v for k, v in raw.items() if k not in ("data", "pretrain", "train", "meta_learning")}
     # Map 'experiment' sub-key to top-level
     if "experiment" in raw:
         top.update(raw["experiment"])
@@ -137,6 +182,7 @@ def load_config(yaml_path: str) -> ExperimentConfig:
         data=data_cfg,
         pretrain=pretrain_cfg,
         train=train_cfg,
+        meta_learning=meta_learning_cfg,
         **{k: v for k, v in top.items() if k in ExperimentConfig.__dataclass_fields__},
     )
 

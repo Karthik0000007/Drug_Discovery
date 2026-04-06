@@ -1,22 +1,33 @@
 """
-tokenizers_and_datasets.py — Character-level tokenization and PyTorch Datasets.
+tokenizers_and_datasets.py — Character-level + pretrained Hugging Face tokenization.
 
-Vocabulary layout:
+Vocabulary layout (character-level):
   0 = <PAD>
   1 = <UNK>
   2 = <MASK>   (used by contrastive augmentations)
-  3.. = data characters (sorted)
+
+Phase 4 additions:
+  - Optional Hugging Face tokenizers (ESM/ProtBERT/ChemBERTa/MolFormer)
+  - Tokenization caching to avoid recomputation
+  - Datasets return raw text + tokenized tensors for LLM alignment
 """
 
-from typing import List, Dict, Tuple
+from __future__ import annotations
+
+from typing import List, Dict, Tuple, Optional, Any
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+# Optional HF tokenizer wrapper (lazy import to avoid hard dependency when unused)
+try:
+    from .pretrained_tokenizers import PretrainedTokenizerWrapper
+except Exception:
+    PretrainedTokenizerWrapper = None
 
-# ──────────────────────────────────────────────
-# Vocabulary
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Vocabulary utilities (character-level baseline)
+# ─────────────────────────────────────────────────────────────────────────────
 
 SPECIAL_TOKENS = ["<PAD>", "<UNK>", "<MASK>"]
 PAD_IDX = 0
@@ -51,14 +62,30 @@ def tokenize_seq(s: str, stoi: Dict[str, int], max_len: int) -> List[int]:
     return ids + [PAD_IDX] * (max_len - len(ids))
 
 
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Hugging Face tokenization helpers (Phase 4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def maybe_tokenize_hf(
+    text: str | List[str],
+    tokenizer: Optional["PretrainedTokenizerWrapper"],
+) -> Optional[Dict[str, torch.Tensor]]:
+    """Tokenize with HF wrapper if provided, else return None."""
+    if tokenizer is None:
+        return None
+    return tokenizer.tokenize(text, return_tensors="pt")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Supervised DTA Dataset
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 class DtaDataset(Dataset):
     """
     PyTorch Dataset for drug–target affinity regression.
-    Returns dicts: {smiles: LongTensor, seq: LongTensor, aff: FloatTensor}.
+
+    Returns dicts containing character-level tensors (for legacy CNN) and,
+    optionally, Hugging Face tokenized tensors + raw text for LLM alignment.
     """
 
     def __init__(
@@ -68,12 +95,20 @@ class DtaDataset(Dataset):
         prot_stoi: Dict[str, int],
         max_sml_len: int = 120,
         max_prot_len: int = 1000,
+        use_pretrained_tokenizers: bool = False,
+        drug_tokenizer: Optional[Any] = None,
+        prot_tokenizer: Optional[Any] = None,
+        return_text: bool = False,
     ):
         self.df = df.reset_index(drop=True)
         self.sml_stoi = sml_stoi
         self.prot_stoi = prot_stoi
         self.max_sml_len = max_sml_len
         self.max_prot_len = max_prot_len
+        self.use_pretrained_tokenizers = use_pretrained_tokenizers or (drug_tokenizer is not None) or (prot_tokenizer is not None)
+        self.drug_tokenizer = drug_tokenizer
+        self.prot_tokenizer = prot_tokenizer
+        self.return_text = return_text or self.use_pretrained_tokenizers
 
         for col in ("smiles", "sequence", "affinity"):
             assert col in df.columns, f"DataFrame must have column '{col}'"
@@ -83,10 +118,24 @@ class DtaDataset(Dataset):
 
     def __getitem__(self, idx: int):
         row = self.df.iloc[idx]
-        s_ids = tokenize_seq(row["smiles"], self.sml_stoi, self.max_sml_len)
-        p_ids = tokenize_seq(row["sequence"], self.prot_stoi, self.max_prot_len)
-        return {
+        smiles = row["smiles"]
+        sequence = row["sequence"]
+
+        s_ids = tokenize_seq(smiles, self.sml_stoi, self.max_sml_len)
+        p_ids = tokenize_seq(sequence, self.prot_stoi, self.max_prot_len)
+
+        sample = {
             "smiles": torch.LongTensor(s_ids),
             "seq": torch.LongTensor(p_ids),
             "aff": torch.FloatTensor([float(row["affinity"])]),
         }
+
+        if self.return_text:
+            sample["smiles_text"] = smiles
+            sample["sequence_text"] = sequence
+
+        if self.use_pretrained_tokenizers:
+            sample["smiles_tokens"] = maybe_tokenize_hf(smiles, self.drug_tokenizer)
+            sample["seq_tokens"] = maybe_tokenize_hf(sequence, self.prot_tokenizer)
+
+        return sample
