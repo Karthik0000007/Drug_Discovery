@@ -24,6 +24,7 @@ import logging
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -37,10 +38,19 @@ from .contrastive_dataset import (
     ContrastiveProteinDataset,
     ContrastiveCrossModalDataset,
 )
-from .contrastive_losses import get_contrastive_loss
+from .contrastive_losses import get_contrastive_loss, compute_contrastive_losses_with_alignment
 from .utilities import set_seed
 
 logger = logging.getLogger(__name__)
+
+
+def _batch_input(batch_dict, device: torch.device, text_key: str, tensor_key: str, token_key: str):
+    """Prefer raw text for pretrained encoders so tokenization happens in batch."""
+    if text_key in batch_dict:
+        return batch_dict[text_key]
+    if token_key in batch_dict:
+        return {k: v.to(device) for k, v in batch_dict[token_key].items()}
+    return batch_dict[tensor_key].to(device)
 
 
 # ──────────────────────────────────────────────
@@ -78,8 +88,8 @@ def pretrain_encoder(
         n_batches = 0
 
         for batch in dataloader:
-            v1 = batch["view1"].to(device)
-            v2 = batch["view2"].to(device)
+            v1 = _batch_input(batch, device, "view1_text", "view1", "view1_tokens")
+            v2 = _batch_input(batch, device, "view2_text", "view2", "view2_tokens")
 
             h1 = encoder(v1)
             h2 = encoder(v2)
@@ -280,8 +290,272 @@ def pretrain_cross_modal_enhanced(
 
 
 # ──────────────────────────────────────────────
-# Main pretraining orchestrator
+# Phase 4: Cross-modal pretraining with LLM alignment
 # ──────────────────────────────────────────────
+
+def pretrain_cross_modal_with_llm_alignment(
+    drug_encoder: DrugEncoder,
+    prot_encoder: ProteinEncoder,
+    drug_proj: ProjectionHead,
+    prot_proj: ProjectionHead,
+    dataloader,
+    loss_fn: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    device: torch.device,
+    epochs: int,
+    temperature: float = 0.07,
+    align_loss_weight: float = 0.5,
+    llm_align_weight: float = 0.3,
+    tb_writer: SummaryWriter | None = None,
+    save_dir: str = "checkpoints/pretrained/",
+    save_every: int = 25,
+) -> float:
+    """
+    Cross-modal pretraining with LLM embedding alignment (Phase 4).
+
+    Incorporates:
+    1. Intra-modal contrastive losses (drug, protein)
+    2. Cross-modal alignment loss (paired drug-protein)
+    3. LLM alignment loss (learned → pretrained knowledge)
+
+    Total loss = loss_drug + loss_protein
+              + align_loss_weight * loss_align
+              + llm_align_weight * (loss_llm_drug + loss_llm_prot) / 2
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    drug_encoder.to(device)
+    prot_encoder.to(device)
+    drug_proj.to(device)
+    prot_proj.to(device)
+
+    scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
+
+    best_loss = float("inf")
+    for epoch in range(1, epochs + 1):
+        drug_encoder.train()
+        prot_encoder.train()
+        drug_proj.train()
+        prot_proj.train()
+        epoch_start_time = time.time()
+
+        total_loss = 0.0
+        total_drug_loss = 0.0
+        total_prot_loss = 0.0
+        total_align_loss = 0.0
+        total_llm_drug_loss = 0.0
+        total_llm_prot_loss = 0.0
+        total_cos_drug = 0.0
+        total_cos_prot = 0.0
+        total_llm_norm_drug = 0.0
+        total_llm_norm_prot = 0.0
+        total_learn_norm_drug = 0.0
+        total_learn_norm_prot = 0.0
+        cos_batches_drug = 0
+        cos_batches_prot = 0
+        n_batches = 0
+
+        for batch in dataloader:
+            batch_start_time = time.time()
+            d1 = _batch_input(batch, device, "drug_view1_text", "drug_view1", "drug_view1_tokens")
+            d2 = _batch_input(batch, device, "drug_view2_text", "drug_view2", "drug_view2_tokens")
+            p1 = _batch_input(batch, device, "prot_view1_text", "prot_view1", "prot_view1_tokens")
+            p2 = _batch_input(batch, device, "prot_view2_text", "prot_view2", "prot_view2_tokens")
+
+            drug_llm_emb = None
+            prot_llm_emb = None
+            drug_align_emb = None
+            prot_align_emb = None
+
+            with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
+                # Encode with learned encoders
+                hd1 = drug_encoder(d1)
+                hd2 = drug_encoder(d2)
+                hp1 = prot_encoder(p1)
+                hp2 = prot_encoder(p2)
+
+                # Project to contrastive space
+                zd1 = drug_proj(hd1)
+                zd2 = drug_proj(hd2)
+                zp1 = prot_proj(hp1)
+                zp2 = prot_proj(hp2)
+
+                # Extract LLM embeddings if using pretrained (projected & normalised)
+                if getattr(drug_encoder, "use_pretrained", False):
+                    drug_llm_emb = drug_encoder.embedding(
+                        d1, return_embeddings=False
+                    )
+                if getattr(prot_encoder, "use_pretrained", False):
+                    prot_llm_emb = prot_encoder.embedding(
+                        p1, return_embeddings=False
+                    )
+
+                # Build learned embeddings for alignment (trim to match LLM dim)
+                if drug_llm_emb is not None:
+                    align_dim_drug = min(hd1.shape[1], drug_llm_emb.shape[1])
+                    drug_align_emb = F.normalize(hd1[:, :align_dim_drug], p=2, dim=1)
+                    drug_llm_emb = F.normalize(
+                        drug_llm_emb[:, :align_dim_drug], p=2, dim=1
+                    )
+
+                if prot_llm_emb is not None:
+                    align_dim_prot = min(hp1.shape[1], prot_llm_emb.shape[1])
+                    prot_align_emb = F.normalize(hp1[:, :align_dim_prot], p=2, dim=1)
+                    prot_llm_emb = F.normalize(
+                        prot_llm_emb[:, :align_dim_prot], p=2, dim=1
+                    )
+
+                # Compute combined losses
+                losses = compute_contrastive_losses_with_alignment(
+                    drug_view1=zd1,
+                    drug_view2=zd2,
+                    prot_view1=zp1,
+                    prot_view2=zp2,
+                    paired_drug_emb=zd1,
+                    paired_prot_emb=zp1,
+                    drug_align_emb=drug_align_emb,
+                    prot_align_emb=prot_align_emb,
+                    drug_llm_emb=drug_llm_emb,
+                    prot_llm_emb=prot_llm_emb,
+                    temperature=temperature,
+                    align_loss_weight=align_loss_weight,
+                    llm_align_weight=llm_align_weight,
+                    loss_fn_name="nt_xent",
+                    distance_metric="cosine",
+                )
+
+                loss = losses["loss_total"]
+
+            optimizer.zero_grad()
+            scaler.scale(loss).backward()
+            all_params = (
+                list(drug_encoder.parameters()) + list(prot_encoder.parameters())
+                + list(drug_proj.parameters()) + list(prot_proj.parameters())
+            )
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(all_params, 5.0)
+            scaler.step(optimizer)
+            scaler.update()
+
+            total_loss += loss.item()
+            total_drug_loss += losses["loss_drug"].item()
+            total_prot_loss += losses["loss_protein"].item()
+            total_align_loss += losses["loss_align"].item()
+            total_llm_drug_loss += (
+                losses["loss_llm_drug"].item()
+                if isinstance(losses["loss_llm_drug"], torch.Tensor)
+                else 0.0
+            )
+            total_llm_prot_loss += (
+                losses["loss_llm_prot"].item()
+                if isinstance(losses["loss_llm_prot"], torch.Tensor)
+                else 0.0
+            )
+
+            # Cosine similarity + norms for logging
+            if drug_llm_emb is not None and drug_align_emb is not None:
+                total_cos_drug += (
+                    F.cosine_similarity(drug_llm_emb, drug_align_emb, dim=1).mean().item()
+                )
+                total_llm_norm_drug += drug_llm_emb.norm(dim=1).mean().item()
+                total_learn_norm_drug += drug_align_emb.norm(dim=1).mean().item()
+                cos_batches_drug += 1
+
+            if prot_llm_emb is not None and prot_align_emb is not None:
+                total_cos_prot += (
+                    F.cosine_similarity(prot_llm_emb, prot_align_emb, dim=1).mean().item()
+                )
+                total_llm_norm_prot += prot_llm_emb.norm(dim=1).mean().item()
+                total_learn_norm_prot += prot_align_emb.norm(dim=1).mean().item()
+                cos_batches_prot += 1
+
+            n_batches += 1
+            if epoch == 1 and n_batches == 1:
+                print(
+                    f"[Pretrain cross-modal+LLM] First batch finished in "
+                    f"{time.time() - batch_start_time:.1f}s"
+                )
+
+        avg_loss = total_loss / max(n_batches, 1)
+        avg_drug_loss = total_drug_loss / max(n_batches, 1)
+        avg_prot_loss = total_prot_loss / max(n_batches, 1)
+        avg_align_loss = total_align_loss / max(n_batches, 1)
+        avg_llm_drug_loss = total_llm_drug_loss / max(n_batches, 1)
+        avg_llm_prot_loss = total_llm_prot_loss / max(n_batches, 1)
+
+        if scheduler is not None:
+            scheduler.step()
+
+        if tb_writer is not None:
+            tb_writer.add_scalar("pretrain/total_loss", avg_loss, epoch)
+            tb_writer.add_scalar("pretrain/drug_loss", avg_drug_loss, epoch)
+            tb_writer.add_scalar("pretrain/protein_loss", avg_prot_loss, epoch)
+            tb_writer.add_scalar("pretrain/align_loss", avg_align_loss, epoch)
+            tb_writer.add_scalar("pretrain/llm_drug_align_loss", avg_llm_drug_loss, epoch)
+            tb_writer.add_scalar("pretrain/llm_prot_align_loss", avg_llm_prot_loss, epoch)
+            tb_writer.add_scalar("pretrain/lr", optimizer.param_groups[0]["lr"], epoch)
+
+            if cos_batches_drug > 0:
+                tb_writer.add_scalar(
+                    "pretrain/cos_sim_drug_llm_learn",
+                    total_cos_drug / cos_batches_drug,
+                    epoch,
+                )
+                tb_writer.add_scalar(
+                    "pretrain/llm_norm_drug",
+                    total_llm_norm_drug / cos_batches_drug,
+                    epoch,
+                )
+                tb_writer.add_scalar(
+                    "pretrain/learn_norm_drug",
+                    total_learn_norm_drug / cos_batches_drug,
+                    epoch,
+                )
+            if cos_batches_prot > 0:
+                tb_writer.add_scalar(
+                    "pretrain/cos_sim_prot_llm_learn",
+                    total_cos_prot / cos_batches_prot,
+                    epoch,
+                )
+                tb_writer.add_scalar(
+                    "pretrain/llm_norm_prot",
+                    total_llm_norm_prot / cos_batches_prot,
+                    epoch,
+                )
+                tb_writer.add_scalar(
+                    "pretrain/learn_norm_prot",
+                    total_learn_norm_prot / cos_batches_prot,
+                    epoch,
+                )
+
+        if epoch % 10 == 0 or epoch == 1:
+            cos_dr = total_cos_drug / max(cos_batches_drug, 1)
+            cos_pr = total_cos_prot / max(cos_batches_prot, 1)
+            print(
+                f"[Pretrain cross-modal+LLM] Epoch {epoch}/{epochs}  "
+                f"Total: {avg_loss:.4f}  Drug: {avg_drug_loss:.4f}  "
+                f"Prot: {avg_prot_loss:.4f}  Align: {avg_align_loss:.4f}  "
+                f"LLM: {(avg_llm_drug_loss + avg_llm_prot_loss) / 2:.4f}  "
+                f"cos(d): {cos_dr:.3f} cos(p): {cos_pr:.3f}  "
+                f"epoch_time: {time.time() - epoch_start_time:.1f}s"
+            )
+
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+
+        if epoch % save_every == 0 or epoch == epochs:
+            torch.save(
+                {"encoder": drug_encoder.state_dict(), "proj_head": drug_proj.state_dict(),
+                 "epoch": epoch, "loss": avg_loss},
+                os.path.join(save_dir, "drug_encoder.pt"),
+            )
+            torch.save(
+                {"encoder": prot_encoder.state_dict(), "proj_head": prot_proj.state_dict(),
+                 "epoch": epoch, "loss": avg_loss},
+                os.path.join(save_dir, "prot_encoder.pt"),
+            )
+
+    return best_loss
 
 def run_pretraining(
     df: pd.DataFrame,
@@ -305,6 +579,15 @@ def run_pretraining(
     conv_out: int = 128,
     max_sml_len: int = 120,
     max_prot_len: int = 1000,
+    # Phase 4: Pretrained model support
+    use_pretrained_embeddings: bool = False,
+    pretrained_drug_model: str | None = None,
+    pretrained_prot_model: str | None = None,
+    freeze_pretrained: bool = True,
+    unfreeze_last_k_layers: int = 0,
+    cache_llm_embeddings: bool = True,
+    llm_align_weight: float = 0.3,
+    # End Phase 4
     device: str = "cuda",
     save_dir: str = "checkpoints/pretrained/",
     tb_dir: str = "runs/pretrain/",
@@ -332,6 +615,11 @@ def run_pretraining(
     tb_writer = SummaryWriter(log_dir=tb_dir)
     encoder_dim = conv_out * 3  # 3 kernels
 
+    # Pretraining now lets the encoder tokenize batched raw text directly.
+    # This avoids slow per-sample tokenization inside __getitem__.
+    drug_tokenizer = None
+    prot_tokenizer = None
+
     results = {}
 
     # ── Drug pretraining ──
@@ -341,13 +629,24 @@ def run_pretraining(
         drug_ds = ContrastiveDrugDataset(
             unique_smiles, sml_stoi, max_sml_len,
             aug_names=drug_aug_names, mask_ratio=mask_ratio, drop_prob=drop_prob,
+            use_pretrained_tokenizer=False,
+            tokenizer=drug_tokenizer,
         )
         drug_loader = DataLoader(
             drug_ds, batch_size=batch_size, shuffle=True,
             num_workers=0, pin_memory=True, drop_last=True,
         )
 
-        drug_enc = DrugEncoder(len(sml_itos), emb_dim, conv_out)
+        drug_enc = DrugEncoder(
+            len(sml_itos),
+            emb_dim,
+            conv_out,
+            pretrained_model=pretrained_drug_model if use_pretrained_embeddings else None,
+            freeze_pretrained=freeze_pretrained,
+            unfreeze_last_k=unfreeze_last_k_layers,
+            cache_pretrained=cache_llm_embeddings,
+            pretrained_max_length=max_sml_len,
+        )
         drug_proj = ProjectionHead(encoder_dim, 128, projection_dim)
         drug_opt = torch.optim.AdamW(
             list(drug_enc.parameters()) + list(drug_proj.parameters()),
@@ -369,13 +668,24 @@ def run_pretraining(
             unique_seqs, prot_stoi, max_prot_len,
             aug_names=prot_aug_names, mask_ratio=mask_ratio,
             crop_min_ratio=crop_min_ratio, sub_ratio=sub_ratio,
+            use_pretrained_tokenizer=False,
+            tokenizer=prot_tokenizer,
         )
         prot_loader = DataLoader(
             prot_ds, batch_size=batch_size, shuffle=True,
             num_workers=0, pin_memory=True, drop_last=True,
         )
 
-        prot_enc = ProteinEncoder(len(prot_itos), emb_dim, conv_out)
+        prot_enc = ProteinEncoder(
+            len(prot_itos),
+            emb_dim,
+            conv_out,
+            pretrained_model=pretrained_prot_model if use_pretrained_embeddings else None,
+            freeze_pretrained=freeze_pretrained,
+            unfreeze_last_k=unfreeze_last_k_layers,
+            cache_pretrained=cache_llm_embeddings,
+            pretrained_max_length=max_prot_len,
+        )
         prot_proj = ProjectionHead(encoder_dim, 128, projection_dim)
         prot_opt = torch.optim.AdamW(
             list(prot_enc.parameters()) + list(prot_proj.parameters()),
@@ -393,20 +703,54 @@ def run_pretraining(
     if mode == "cross_modal":
         print("\n=== Cross-Modal Pretraining (Phase 1 Enhanced) ===")
         print(f"Using align_loss_weight = {align_loss_weight}")
-        
+
+        # Phase 4: Log pretrained model configuration
+        if use_pretrained_embeddings:
+            print(f"\n[Phase 4] Using pretrained embeddings:")
+            print(f"  Drug model: {pretrained_drug_model}")
+            print(f"  Protein model: {pretrained_prot_model}")
+            print(f"  Freeze: {freeze_pretrained}, Unfreeze last K: {unfreeze_last_k_layers}")
+            print(f"  Cache LLM embeddings: {cache_llm_embeddings}")
+            print(f"  LLM alignment weight: {llm_align_weight}")
+            print(f"  Max lengths: drug={max_sml_len}, protein={max_prot_len}")
+            if batch_size > 32:
+                print(
+                    f"[Phase 4] Warning: batch_size={batch_size} is very large for pretrained encoders. "
+                    "Expect slow steps or OOM; batch sizes 8-32 are usually more realistic."
+                )
+
         cm_ds = ContrastiveCrossModalDataset(
             df, sml_stoi, prot_stoi, max_sml_len, max_prot_len,
             drug_aug_names=drug_aug_names, prot_aug_names=prot_aug_names,
             mask_ratio=mask_ratio, drop_prob=drop_prob,
             crop_min_ratio=crop_min_ratio, sub_ratio=sub_ratio,
+            use_pretrained_tokenizers=False,
+            drug_tokenizer=drug_tokenizer,
+            prot_tokenizer=prot_tokenizer,
         )
         cm_loader = DataLoader(
             cm_ds, batch_size=batch_size, shuffle=True,
             num_workers=0, pin_memory=True, drop_last=True,
         )
 
-        drug_enc = DrugEncoder(len(sml_itos), emb_dim, conv_out)
-        prot_enc = ProteinEncoder(len(prot_itos), emb_dim, conv_out)
+        # Phase 4: Initialize encoders with optional pretrained models
+        drug_enc = DrugEncoder(
+            len(sml_itos), emb_dim, conv_out,
+            pretrained_model=pretrained_drug_model if use_pretrained_embeddings else None,
+            freeze_pretrained=freeze_pretrained,
+            unfreeze_last_k=unfreeze_last_k_layers,
+            cache_pretrained=cache_llm_embeddings,
+            pretrained_max_length=max_sml_len,
+        )
+        prot_enc = ProteinEncoder(
+            len(prot_itos), emb_dim, conv_out,
+            pretrained_model=pretrained_prot_model if use_pretrained_embeddings else None,
+            freeze_pretrained=freeze_pretrained,
+            unfreeze_last_k=unfreeze_last_k_layers,
+            cache_pretrained=cache_llm_embeddings,
+            pretrained_max_length=max_prot_len,
+        )
+
         drug_proj = ProjectionHead(encoder_dim, 128, projection_dim)
         prot_proj = ProjectionHead(encoder_dim, 128, projection_dim)
 
@@ -417,13 +761,25 @@ def run_pretraining(
         cm_opt = torch.optim.AdamW(all_params, lr=lr, weight_decay=weight_decay)
         cm_sched = torch.optim.lr_scheduler.CosineAnnealingLR(cm_opt, T_max=epochs)
 
-        pretrain_cross_modal_enhanced(
-            drug_enc, prot_enc, drug_proj, prot_proj,
-            cm_loader, loss_fn, cm_opt, cm_sched,
-            device, epochs, temperature=temperature,
-            align_loss_weight=align_loss_weight,
-            tb_writer=tb_writer, save_dir=save_dir,
-        )
+        # Phase 4: Use enhanced training with LLM alignment if using pretrained models
+        if use_pretrained_embeddings:
+            pretrain_cross_modal_with_llm_alignment(
+                drug_enc, prot_enc, drug_proj, prot_proj,
+                cm_loader, loss_fn, cm_opt, cm_sched,
+                device, epochs, temperature=temperature,
+                align_loss_weight=align_loss_weight,
+                llm_align_weight=llm_align_weight,
+                tb_writer=tb_writer, save_dir=save_dir,
+            )
+        else:
+            # Use standard cross-modal pretraining
+            pretrain_cross_modal_enhanced(
+                drug_enc, prot_enc, drug_proj, prot_proj,
+                cm_loader, loss_fn, cm_opt, cm_sched,
+                device, epochs, temperature=temperature,
+                align_loss_weight=align_loss_weight,
+                tb_writer=tb_writer, save_dir=save_dir,
+            )
         results["drug_ckpt"] = os.path.join(save_dir, "drug_encoder.pt")
         results["prot_ckpt"] = os.path.join(save_dir, "prot_encoder.pt")
 
@@ -467,6 +823,25 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--out", type=str, default="checkpoints/pretrained/")
     parser.add_argument("--tb-dir", type=str, default="runs/pretrain/")
+
+    # Phase 4: Pretrained model arguments
+    parser.add_argument("--use-pretrained", action="store_true", default=False,
+                        help="Enable pretrained LLM embeddings")
+    parser.add_argument("--pretrained-drug", type=str, default=None,
+                        choices=["chemberta", "molformer"],
+                        help="Pretrained drug model")
+    parser.add_argument("--pretrained-prot", type=str, default=None,
+                        choices=["esm2_t33", "esm2_t6", "protbert"],
+                        help="Pretrained protein model")
+    parser.add_argument("--freeze-pretrained", action="store_true", default=True,
+                        help="Freeze pretrained model weights")
+    parser.add_argument("--unfreeze-last-k", type=int, default=0,
+                        help="Number of final layers to unfreeze")
+    parser.add_argument("--cache-llm-embeddings", action="store_true", default=True,
+                        help="Cache LLM embeddings to avoid recomputation")
+    parser.add_argument("--llm-align-weight", type=float, default=0.3,
+                        help="Weight for LLM embedding alignment loss")
+
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -493,6 +868,14 @@ def main():
         save_dir=args.out,
         tb_dir=args.tb_dir,
         seed=args.seed,
+        # Phase 4: Pretrained models
+        use_pretrained_embeddings=args.use_pretrained,
+        pretrained_drug_model=args.pretrained_drug,
+        pretrained_prot_model=args.pretrained_prot,
+        freeze_pretrained=args.freeze_pretrained,
+        unfreeze_last_k_layers=args.unfreeze_last_k,
+        cache_llm_embeddings=args.cache_llm_embeddings,
+        llm_align_weight=args.llm_align_weight,
     )
 
 
