@@ -62,6 +62,21 @@ def tokenize_seq(s: str, stoi: Dict[str, int], max_len: int) -> List[int]:
     return ids + [PAD_IDX] * (max_len - len(ids))
 
 
+def char_tokenize(s: str, vocab: Optional[Dict[str, int]] = None, max_len: int = 100) -> List[int]:
+    """Simple character-level tokenization without vocabulary."""
+    # Map characters to small set of indices (3-20) to stay within vocab constraints
+    ids = []
+    for ch in s:
+        char_code = ord(ch)
+        # Simple mapping: use last 4 bits to get 0-15, then add 3 for 3-18
+        idx = ((char_code % 16) + 3) % 20  # Keep within reasonable range
+        ids.append(idx)
+
+    if len(ids) >= max_len:
+        return ids[:max_len]
+    return ids + [PAD_IDX] * (max_len - len(ids))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Hugging Face tokenization helpers (Phase 4)
 # ─────────────────────────────────────────────────────────────────────────────
