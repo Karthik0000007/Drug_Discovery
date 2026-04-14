@@ -38,13 +38,13 @@ except ImportError:
 # ──────────────────────────────────────────────
 
 STYLE = {
-    "font.size": 12,
-    "axes.titlesize": 14,
-    "axes.labelsize": 12,
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
-    "legend.fontsize": 10,
-    "figure.dpi": 150,
+    "font.size": 16,
+    "axes.titlesize": 20,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 14,
+    "figure.dpi": 200,
     "savefig.dpi": 300,
     "savefig.bbox": "tight",
 }
@@ -376,3 +376,219 @@ def generate_all_figures(results_dir: str, output_dir: str = "figures"):
             )
 
     print(f"[viz] All figures saved to {output_dir}/")
+
+
+# ──────────────────────────────────────────────
+# Phase 8: Attention Heatmap
+# ──────────────────────────────────────────────
+
+def plot_attention_heatmap(
+    attn_weights: np.ndarray,
+    sequence: Optional[str] = None,
+    title: str = "Attention Weights per Residue",
+    save_path: Optional[str] = None,
+    max_residues: int = 100,
+) -> plt.Figure:
+    """
+    Plot attention heatmap over protein residue positions.
+
+    Parameters
+    ----------
+    attn_weights : (H, L) or (L,) attention weights
+        H = num_heads, L = protein sequence length
+    sequence : str, optional
+        Protein sequence for x-axis labels
+    max_residues : int
+        Maximum residues to display (truncate for readability)
+    """
+    apply_style()
+
+    if attn_weights.ndim == 1:
+        attn_weights = attn_weights[np.newaxis, :]
+
+    L = min(attn_weights.shape[-1], max_residues)
+    attn_weights = attn_weights[:, :L]
+
+    fig, ax = plt.subplots(figsize=(max(8, L * 0.12), max(3, attn_weights.shape[0] * 0.5)))
+    im = ax.imshow(attn_weights, cmap="viridis", aspect="auto")
+
+    ax.set_xlabel("Protein Residue Position")
+    ax.set_ylabel("Attention Head")
+    ax.set_title(title)
+    fig.colorbar(im, ax=ax, shrink=0.8, label="Attention Weight")
+
+    if sequence and L <= 80:
+        ax.set_xticks(range(L))
+        ax.set_xticklabels(list(sequence[:L]), fontsize=12)
+
+    ax.set_yticks(range(attn_weights.shape[0]))
+    ax.set_yticklabels([f"Head {i}" for i in range(attn_weights.shape[0])], fontsize=14)
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path)
+        print(f"[viz] Saved attention heatmap to {save_path}")
+    return fig
+
+
+# ──────────────────────────────────────────────
+# Phase 7/8: Uncertainty Calibration Curve
+# ──────────────────────────────────────────────
+
+def plot_uncertainty_calibration(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    uncertainties: np.ndarray,
+    n_bins: int = 10,
+    title: str = "Uncertainty Calibration",
+    save_path: Optional[str] = None,
+) -> plt.Figure:
+    """
+    Calibration plot: predicted uncertainty vs actual error.
+
+    Parameters
+    ----------
+    y_true : (N,) true values
+    y_pred : (N,) predictions
+    uncertainties : (N,) predicted uncertainties
+    """
+    apply_style()
+    errors = np.abs(y_true - y_pred)
+    bin_edges = np.percentile(uncertainties, np.linspace(0, 100, n_bins + 1))
+
+    bin_errors = []
+    bin_uncerts = []
+    for i in range(n_bins):
+        mask = (uncertainties >= bin_edges[i]) & (uncertainties < bin_edges[i + 1] + 1e-8)
+        if mask.sum() > 0:
+            bin_errors.append(errors[mask].mean())
+            bin_uncerts.append(uncertainties[mask].mean())
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Left: calibration curve
+    ax = axes[0]
+    if bin_uncerts:
+        ax.scatter(bin_uncerts, bin_errors, s=50, color="#e74c3c", zorder=5)
+        lo = min(min(bin_uncerts), min(bin_errors))
+        hi = max(max(bin_uncerts), max(bin_errors))
+        ax.plot([lo, hi], [lo, hi], "k--", alpha=0.5, label="Perfect calibration")
+    ax.set_xlabel("Predicted Uncertainty")
+    ax.set_ylabel("Actual Error")
+    ax.set_title("Calibration Curve")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    # Right: uncertainty vs error scatter
+    ax2 = axes[1]
+    ax2.scatter(uncertainties, errors, s=5, alpha=0.3, color="#3498db")
+    ax2.set_xlabel("Predicted Uncertainty")
+    ax2.set_ylabel("|y_true - y_pred|")
+    ax2.set_title("Uncertainty vs. Error")
+    ax2.grid(alpha=0.3)
+
+    if errors.std() > 0 and uncertainties.std() > 0:
+        r = np.corrcoef(uncertainties, errors)[0, 1]
+        ax2.text(0.05, 0.92, f"Pearson r = {r:.3f}",
+                 transform=ax2.transAxes, fontsize=10,
+                 bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+
+    fig.suptitle(title, y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path)
+        print(f"[viz] Saved calibration plot to {save_path}")
+    return fig
+
+
+# ──────────────────────────────────────────────
+# Phase 8: Embedding Comparison (Before / After)
+# ──────────────────────────────────────────────
+
+def plot_embedding_comparison(
+    embeddings_before: np.ndarray,
+    embeddings_after: np.ndarray,
+    labels: Optional[np.ndarray] = None,
+    method: str = "tsne",
+    title: str = "Embedding Space: Before vs After Contrastive Learning",
+    save_path: Optional[str] = None,
+) -> plt.Figure:
+    """
+    Side-by-side comparison of embedding spaces before and after training.
+
+    Parameters
+    ----------
+    embeddings_before : (N, D) embeddings before contrastive pretraining
+    embeddings_after : (N, D) embeddings after contrastive pretraining
+    labels : (N,) optional category labels for coloring
+    method : 'tsne' or 'umap'
+    """
+    apply_style()
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    for ax, emb, subtitle in zip(
+        axes,
+        [embeddings_before, embeddings_after],
+        ["Before Pretraining", "After Pretraining"],
+    ):
+        if method == "umap" and UMAP_AVAILABLE:
+            reducer = umap.UMAP(n_components=2, random_state=42)
+            coords = reducer.fit_transform(emb)
+        elif TSNE_AVAILABLE:
+            reducer = TSNE(n_components=2, perplexity=30, random_state=42)
+            coords = reducer.fit_transform(emb)
+        else:
+            ax.text(0.5, 0.5, "t-SNE/UMAP not available",
+                    ha="center", va="center", transform=ax.transAxes)
+            continue
+
+        if labels is not None:
+            unique = np.unique(labels)
+            cmap = plt.cm.get_cmap("tab20", len(unique))
+            for i, lbl in enumerate(unique):
+                mask = labels == lbl
+                ax.scatter(coords[mask, 0], coords[mask, 1],
+                           color=cmap(i), s=10, alpha=0.6, label=str(lbl))
+            if len(unique) <= 15:
+                ax.legend(fontsize=6, markerscale=2)
+        else:
+            ax.scatter(coords[:, 0], coords[:, 1], s=10, alpha=0.6, color="#3498db")
+
+        ax.set_title(subtitle)
+        ax.set_xlabel(f"{method.upper()} dim 1")
+        ax.set_ylabel(f"{method.upper()} dim 2")
+        ax.grid(alpha=0.2)
+
+    fig.suptitle(title, fontsize=14, y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path)
+        print(f"[viz] Saved embedding comparison to {save_path}")
+    return fig
+
+
+# ──────────────────────────────────────────────
+# Phase 11: Publication Artifact Generation
+# ──────────────────────────────────────────────
+
+def generate_paper_artifacts(
+    results_dir: str,
+    output_dir: str = "paper/figures",
+) -> None:
+    """
+    Generate all publication-ready figures from experiment results.
+
+    Produces:
+    - Main results table (all models × splits × metrics)
+    - Ablation heatmaps / bar charts
+    - Training curves comparison
+    - Uncertainty calibration curves
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    generate_all_figures(results_dir, output_dir)
+    print(f"[viz] Publication artifacts saved to {output_dir}/")
