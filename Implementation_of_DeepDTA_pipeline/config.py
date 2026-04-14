@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import yaml
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 # ──────────────────────────────────────────────
@@ -81,7 +81,7 @@ class PretrainConfig:
 class TrainConfig:
     """Supervised fine-tuning configuration."""
     epochs: int = 30
-    batch_size: int = 128
+    batch_size: int = 256                      # Increased for better GPU utilization
     lr: float = 1e-4
     weight_decay: float = 1e-5
     patience: int = 8
@@ -91,6 +91,15 @@ class TrainConfig:
     grad_clip: float = 5.0
     freeze_strategy: str = "full_finetune"     # 'frozen' | 'full_finetune' | 'gradual_unfreeze'
     unfreeze_after: int = 5                    # epochs for gradual unfreeze
+
+    # Phase 6: Pocket-Guided Attention
+    use_attention_module: bool = False         # Enable pocket-guided cross-attention
+    attention_heads: int = 4                   # Number of attention heads
+    attention_max_seq_len: int = 1200          # Max protein sequence length for attention
+
+    # Phase 7: Evidential Regression / Uncertainty
+    use_evidential: bool = False               # Enable evidential regression head
+    evidential_reg_weight: float = 0.01        # Regularization weight for evidential loss
 
 
 @dataclass
@@ -124,6 +133,20 @@ class MetaLearningConfig:
     checkpoint_dir: str = "checkpoints/meta_learning/"
 
 
+@dataclass
+class MultiTaskConfig:
+    """Phase 9/10: Multi-task learning configuration."""
+    enabled: bool = False                      # Enable multi-task learning
+    num_moa_classes: int = 0                   # Number of MoA classes (0 = disabled)
+    affinity_threshold: float = 7.0            # pKd threshold for binary interaction label
+    use_dynamic_weighting: bool = False        # Uncertainty-based dynamic loss weighting
+    loss_weights: Dict = field(default_factory=lambda: {
+        "affinity": 1.0,
+        "interaction": 1.0,
+        "moa": 1.0,
+    })
+
+
 # ──────────────────────────────────────────────
 # Top-level experiment config
 # ──────────────────────────────────────────────
@@ -135,6 +158,7 @@ class ExperimentConfig:
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     meta_learning: MetaLearningConfig = field(default_factory=MetaLearningConfig)
+    multitask: MultiTaskConfig = field(default_factory=MultiTaskConfig)
     model: str = "cl_dta"                      # 'deepdta' | 'graphdta' | 'widedta' | 'attndta' | 'cl_dta'
     seed: int = 42
     seeds: List[int] = field(default_factory=lambda: [42, 123, 456])
@@ -172,8 +196,10 @@ def load_config(yaml_path: str) -> ExperimentConfig:
     pretrain_cfg = PretrainConfig(**raw.get("pretrain", {}))
     train_cfg = TrainConfig(**raw.get("train", {}))
     meta_learning_cfg = MetaLearningConfig(**raw.get("meta_learning", {}))
+    multitask_cfg = MultiTaskConfig(**raw.get("multitask", {}))
 
-    top = {k: v for k, v in raw.items() if k not in ("data", "pretrain", "train", "meta_learning")}
+    sub_keys = ("data", "pretrain", "train", "meta_learning", "multitask")
+    top = {k: v for k, v in raw.items() if k not in sub_keys}
     # Map 'experiment' sub-key to top-level
     if "experiment" in raw:
         top.update(raw["experiment"])
@@ -183,6 +209,7 @@ def load_config(yaml_path: str) -> ExperimentConfig:
         pretrain=pretrain_cfg,
         train=train_cfg,
         meta_learning=meta_learning_cfg,
+        multitask=multitask_cfg,
         **{k: v for k, v in top.items() if k in ExperimentConfig.__dataclass_fields__},
     )
 
