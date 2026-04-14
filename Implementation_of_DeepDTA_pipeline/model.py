@@ -14,11 +14,55 @@ Phase 4 adds:
 
 from __future__ import annotations
 
+import importlib
 from typing import Optional, Union, List, Dict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+def _configure_torch_sdpa_backends() -> None:
+    """Force math-only SDPA to avoid cuDNN execution-plan failures on some GPUs."""
+    try:
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+            torch.backends.cuda.enable_cudnn_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+        print("[model.py] Configured torch SDPA backends (math-only)")
+    except Exception as e:  # pragma: no cover - best effort
+        print(f"[Warning] Could not fully configure torch SDPA backends: {e}")
+
+
+def _patch_transformers_sdpa_to_eager() -> None:
+    """Patch HF SDPA integration to use eager attention when available."""
+    patched_modules = []
+    for module_name in ("transformers.integrations.sdpa_attention", "transformers.integrations.sdpa"):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+
+        eager_forward = getattr(module, "eager_attention_forward", None)
+        sdpa_forward = getattr(module, "sdpa_attention_forward", None)
+        if callable(eager_forward) and callable(sdpa_forward):
+            setattr(module, "sdpa_attention_forward", eager_forward)
+            patched_modules.append(module_name)
+
+    if patched_modules:
+        print(
+            "[model.py] Patched transformers SDPA attention to eager in: "
+            + ", ".join(patched_modules)
+        )
+    else:
+        print(
+            "[Warning] Could not patch transformers SDPA module; "
+            "relying on eager-attention model loading."
+        )
+
+
+_configure_torch_sdpa_backends()
+_patch_transformers_sdpa_to_eager()
 
 # Patch torch.load to bypass weights_only security check for legacy models
 _original_torch_load = torch.load
@@ -127,9 +171,25 @@ class PretrainedEncoder(nn.Module):
         print(f"[PretrainedEncoder] Loading {model_name} from {hf_model_id}...")
 
         self.tokenizer = AutoTokenizer.from_pretrained(hf_model_id)
-        self.pretrained_model = AutoModel.from_pretrained(
-            hf_model_id, dtype=torch.float32, trust_remote_code=False
-        )
+        model_kwargs = {
+            "dtype": torch.float32,
+            "trust_remote_code": False,
+        }
+        try:
+            self.pretrained_model = AutoModel.from_pretrained(
+                hf_model_id,
+                attn_implementation="eager",
+                **model_kwargs,
+            )
+            print("[PretrainedEncoder] Attention implementation forced to eager")
+        except (TypeError, ValueError) as attn_err:
+            print(
+                "[PretrainedEncoder] Could not force eager attention "
+                f"({attn_err}); using model default."
+            )
+            self.pretrained_model = AutoModel.from_pretrained(
+                hf_model_id, **model_kwargs
+            )
 
         # Determine hidden dimension from model
         hidden_dim = getattr(self.pretrained_model.config, "hidden_size", None)
@@ -246,7 +306,20 @@ class PretrainedEncoder(nn.Module):
 
         requires_grad = any(p.requires_grad for p in self.pretrained_model.parameters())
         with torch.set_grad_enabled(requires_grad):
-            outputs = self.pretrained_model(**tokens, output_hidden_states=False)
+            try:
+                outputs = self.pretrained_model(**tokens, output_hidden_states=False)
+            except RuntimeError as runtime_err:
+                msg = str(runtime_err)
+                if "cudnn_frontend" not in msg or "No valid execution plans built" not in msg:
+                    raise
+
+                # Retry once with the most conservative SDPA backend settings.
+                _configure_torch_sdpa_backends()
+                print(
+                    "[PretrainedEncoder] Retrying transformer forward pass "
+                    "with math-only SDPA backend..."
+                )
+                outputs = self.pretrained_model(**tokens, output_hidden_states=False)
 
         # Pooling
         if self.pooling == "cls" and getattr(outputs, "pooler_output", None) is not None:
@@ -497,6 +570,11 @@ class DeepDTAModel(nn.Module):
     """
     DeepDTA-like CNN model for drug–target affinity prediction.
 
+    Supports optional modules from later phases:
+    - Phase 6: Pocket-guided cross-attention (use_attention_module)
+    - Phase 7: Evidential regression head (use_evidential)
+    - Phase 9: Multi-task prediction head (use_multitask)
+
     Parameters
     ----------
     vocab_drug, vocab_prot : vocabulary sizes (including special tokens).
@@ -505,6 +583,16 @@ class DeepDTAModel(nn.Module):
     sml_kernels, prot_kernels : kernel sizes for drug / protein branches.
     dropout : dropout probability in FC head.
     pretrained_drug_model, pretrained_prot_model : optional HF model names.
+    use_attention_module : bool
+        Phase 6: enable pocket-guided cross-attention.
+    attention_heads : int
+        Number of attention heads for PocketGuidedAttention.
+    use_evidential : bool
+        Phase 7: replace FC head with evidential regression head.
+    use_multitask : bool
+        Phase 9: replace FC head with multi-task prediction head.
+    num_moa_classes : int
+        Number of MoA classes for multi-task head (0 = disabled).
     """
 
     def __init__(
@@ -525,8 +613,21 @@ class DeepDTAModel(nn.Module):
         pooling: str = "cls",
         max_sml_len: int = 120,
         max_prot_len: int = 1000,
+        # Phase 6: Attention
+        use_attention_module: bool = False,
+        attention_heads: int = 4,
+        attention_max_seq_len: int = 1200,
+        # Phase 7: Evidential
+        use_evidential: bool = False,
+        # Phase 9: Multi-task
+        use_multitask: bool = False,
+        num_moa_classes: int = 0,
     ):
         super().__init__()
+        self.use_attention = use_attention_module
+        self.use_evidential = use_evidential
+        self.use_multitask = use_multitask
+
         self.drug_encoder = DrugEncoder(
             vocab_drug,
             emb_dim,
@@ -553,7 +654,62 @@ class DeepDTAModel(nn.Module):
         )
 
         total = self.drug_encoder.out_dim + self.prot_encoder.out_dim
-        self.fc = nn.Sequential(
+
+        # Phase 6: Pocket-Guided Cross-Attention (optional)
+        self.attention_module = None
+        self.prot_seq_features = None
+        if use_attention_module:
+            try:
+                from .pocket_attention import PocketGuidedAttention, ProteinSequenceFeatures
+                self.prot_seq_features = ProteinSequenceFeatures(
+                    vocab_prot, emb_dim, conv_out, prot_kernels,
+                )
+                attn_dim = self.prot_seq_features.out_dim
+                self.attention_module = PocketGuidedAttention(
+                    embed_dim=attn_dim,
+                    num_heads=attention_heads,
+                    max_seq_len=attention_max_seq_len,
+                )
+                # Attention output replaces drug encoder output
+                total = attn_dim + self.prot_encoder.out_dim
+                print(f"[model] Phase 6: Pocket-guided attention enabled "
+                      f"(heads={attention_heads}, dim={attn_dim})")
+            except ImportError:
+                print("[Warning] pocket_attention.py not found; attention module disabled.")
+
+        # Phase 7: Evidential Regression Head (optional)
+        if use_evidential:
+            try:
+                from .evidential import EvidentialRegressionHead
+                self.fc = EvidentialRegressionHead(
+                    input_dim=total, hidden_dim=256, dropout=dropout,
+                )
+                print("[model] Phase 7: Evidential regression head enabled")
+            except ImportError:
+                print("[Warning] evidential.py not found; using standard FC head.")
+                self.fc = self._build_standard_fc(total, dropout)
+        elif use_multitask:
+            # Phase 9: Multi-Task Head (optional)
+            try:
+                from .multitask import MultiTaskHead
+                self.fc = MultiTaskHead(
+                    input_dim=total,
+                    num_moa_classes=num_moa_classes,
+                    hidden_dim=256,
+                    dropout=dropout,
+                )
+                print(f"[model] Phase 9: Multi-task head enabled "
+                      f"(moa_classes={num_moa_classes})")
+            except ImportError:
+                print("[Warning] multitask.py not found; using standard FC head.")
+                self.fc = self._build_standard_fc(total, dropout)
+        else:
+            self.fc = self._build_standard_fc(total, dropout)
+
+    @staticmethod
+    def _build_standard_fc(total: int, dropout: float) -> nn.Sequential:
+        """Build the standard deterministic FC prediction head."""
+        return nn.Sequential(
             nn.Linear(total, 1024),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -581,15 +737,47 @@ class DeepDTAModel(nn.Module):
         return self.prot_encoder.convs
 
     # Forward --------------------------------------------------------------
-    def forward(self, smiles: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        smiles: torch.Tensor,
+        seq: torch.Tensor,
+        pocket_mask: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, dict]:
         """
         smiles, seq : LongTensor (B, L) or token dicts (if using pretrained).
-        Returns : (B,) predicted affinity
+        pocket_mask : optional (B, L) binary mask for pocket-guided attention.
+        Returns : (B,) predicted affinity, or dict if evidential/multitask.
         """
         d = self.drug_encoder(smiles)
         p = self.prot_encoder(seq)
-        x = torch.cat([d, p], dim=1)
-        return self.fc(x).squeeze(-1)
+
+        # Phase 6: apply pocket-guided cross-attention
+        self._last_attn_weights = None
+        if self.attention_module is not None and self.prot_seq_features is not None:
+            prot_seq = self.prot_seq_features(seq)   # (B, L', D_attn)
+            # Pad drug embedding to match attention dim if needed
+            if d.size(-1) != self.attention_module.embed_dim:
+                # Project drug features to attention dimension
+                if not hasattr(self, '_drug_proj'):
+                    self._drug_proj = nn.Linear(
+                        d.size(-1), self.attention_module.embed_dim
+                    ).to(d.device)
+                d_attn = self._drug_proj(d)
+            else:
+                d_attn = d
+            d_enhanced, attn_w = self.attention_module(d_attn, prot_seq, pocket_mask)
+            self._last_attn_weights = attn_w
+            x = torch.cat([d_enhanced, p], dim=1)
+        else:
+            x = torch.cat([d, p], dim=1)
+
+        out = self.fc(x)
+
+        # Standard FC head returns tensor; squeeze it
+        if isinstance(out, torch.Tensor):
+            return out.squeeze(-1)
+        # Evidential / Multi-task heads return dicts
+        return out
 
     # Pretrained weight transfer ------------------------------------------
     def load_pretrained_encoders(
@@ -612,9 +800,10 @@ class DeepDTAModel(nn.Module):
             print(f"[model] Loaded pretrained protein encoder from {prot_ckpt}")
 
         # Reinitialise FC head
-        for layer in self.fc:
-            if hasattr(layer, "reset_parameters"):
-                layer.reset_parameters()
+        if isinstance(self.fc, nn.Sequential):
+            for layer in self.fc:
+                if hasattr(layer, "reset_parameters"):
+                    layer.reset_parameters()
 
     def freeze_encoders(self) -> None:
         """Freeze drug & protein encoder weights (train FC head only)."""
@@ -636,9 +825,15 @@ class DeepDTAModel(nn.Module):
         def count(module):
             return sum(p.numel() for p in module.parameters())
 
-        return {
+        result = {
             "drug_encoder": count(self.drug_encoder),
             "prot_encoder": count(self.prot_encoder),
             "fc_head": count(self.fc),
             "total": count(self),
         }
+        if self.attention_module is not None:
+            result["attention_module"] = count(self.attention_module)
+        if self.prot_seq_features is not None:
+            result["prot_seq_features"] = count(self.prot_seq_features)
+        return result
+
