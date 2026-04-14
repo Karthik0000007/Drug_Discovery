@@ -17,6 +17,9 @@ Usage (CLI):
 from __future__ import annotations
 
 import os
+# Set BEFORE any transformers import
+os.environ['TRANSFORMERS_ATTENTION_IMPLEMENTATION'] = 'eager'
+
 import time
 import argparse
 import logging
@@ -40,6 +43,7 @@ from .contrastive_dataset import (
 )
 from .contrastive_losses import get_contrastive_loss, compute_contrastive_losses_with_alignment
 from .utilities import set_seed
+from .gpu_config import configure_gpu, get_optimal_num_workers
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +77,17 @@ def pretrain_encoder(
 ) -> float:
     """
     Train a single encoder + projection head with contrastive loss.
+    Uses mixed precision (AMP) for GPU acceleration.
 
     Returns the final epoch loss.
     """
     os.makedirs(save_dir, exist_ok=True)
     encoder.to(device)
     proj_head.to(device)
+
+    # Initialize AMP scaler
+    amp_enabled = device.type == "cuda"
+    scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
 
     best_loss = float("inf")
     for epoch in range(1, epochs + 1):
@@ -91,19 +100,21 @@ def pretrain_encoder(
             v1 = _batch_input(batch, device, "view1_text", "view1", "view1_tokens")
             v2 = _batch_input(batch, device, "view2_text", "view2", "view2_tokens")
 
-            h1 = encoder(v1)
-            h2 = encoder(v2)
-            z1 = proj_head(h1)
-            z2 = proj_head(h2)
+            with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
+                h1 = encoder(v1)
+                h2 = encoder(v2)
+                z1 = proj_head(h1)
+                z2 = proj_head(h2)
+                loss = loss_fn(z1, z2)
 
-            loss = loss_fn(z1, z2)
-
-            optimizer.zero_grad()
-            loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
                 list(encoder.parameters()) + list(proj_head.parameters()), 5.0
             )
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             total_loss += loss.item()
             n_batches += 1
@@ -183,6 +194,10 @@ def pretrain_cross_modal_enhanced(
     drug_proj.to(device)
     prot_proj.to(device)
 
+    # Initialize AMP scaler
+    amp_enabled = device.type == "cuda"
+    scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
+
     best_loss = float("inf")
     for epoch in range(1, epochs + 1):
         drug_encoder.train()
@@ -202,47 +217,50 @@ def pretrain_cross_modal_enhanced(
             d1 = batch["drug_view1"].to(device)
             d2 = batch["drug_view2"].to(device)
             p1 = batch["prot_view1"].to(device)
-            p2 = batch["prot_view2"].to(device)
+            p2 = batch["prot_view2"].to(device, non_blocking=True)
 
-            # Encode all views
-            hd1 = drug_encoder(d1)
-            hd2 = drug_encoder(d2)
-            hp1 = prot_encoder(p1)
-            hp2 = prot_encoder(p2)
-            
-            # Project to contrastive space
-            zd1 = drug_proj(hd1)
-            zd2 = drug_proj(hd2)
-            zp1 = prot_proj(hp1)
-            zp2 = prot_proj(hp2)
-            
-            # Use first view for cross-modal alignment (could also average)
-            paired_drug = zd1
-            paired_prot = zp1
+            with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
+                # Encode all views
+                hd1 = drug_encoder(d1)
+                hd2 = drug_encoder(d2)
+                hp1 = prot_encoder(p1)
+                hp2 = prot_encoder(p2)
+                
+                # Project to contrastive space
+                zd1 = drug_proj(hd1)
+                zd2 = drug_proj(hd2)
+                zp1 = prot_proj(hp1)
+                zp2 = prot_proj(hp2)
+                
+                # Use first view for cross-modal alignment (could also average)
+                paired_drug = zd1
+                paired_prot = zp1
 
-            # Compute combined losses
-            losses = compute_contrastive_losses(
-                drug_view1=zd1,
-                drug_view2=zd2,
-                prot_view1=zp1,
-                prot_view2=zp2,
-                paired_drug_emb=paired_drug,
-                paired_prot_emb=paired_prot,
-                temperature=temperature,
-                align_loss_weight=align_loss_weight,
-                loss_fn_name="nt_xent",  # Use NT-Xent for all components
-            )
+                # Compute combined losses
+                losses = compute_contrastive_losses(
+                    drug_view1=zd1,
+                    drug_view2=zd2,
+                    prot_view1=zp1,
+                    prot_view2=zp2,
+                    paired_drug_emb=paired_drug,
+                    paired_prot_emb=paired_prot,
+                    temperature=temperature,
+                    align_loss_weight=align_loss_weight,
+                    loss_fn_name="nt_xent",  # Use NT-Xent for all components
+                )
 
-            loss = losses["loss_total"]
+                loss = losses["loss_total"]
 
-            optimizer.zero_grad()
-            loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
             all_params = (
                 list(drug_encoder.parameters()) + list(prot_encoder.parameters())
                 + list(drug_proj.parameters()) + list(prot_proj.parameters())
             )
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(all_params, 5.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             total_loss += loss.item()
             total_drug_loss += losses["loss_drug"].item()
@@ -426,7 +444,7 @@ def pretrain_cross_modal_with_llm_alignment(
 
                 loss = losses["loss_total"]
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             all_params = (
                 list(drug_encoder.parameters()) + list(prot_encoder.parameters())
@@ -600,6 +618,11 @@ def run_pretraining(
     """
     set_seed(seed)
     device = torch.device(device if torch.cuda.is_available() else "cpu")
+
+    # Configure GPU for 80% utilization
+    if device.type == "cuda":
+        device = configure_gpu(memory_fraction=0.80)
+
     os.makedirs(save_dir, exist_ok=True)
 
     # Build vocabularies from full dataset
@@ -612,7 +635,9 @@ def run_pretraining(
     loss_kwargs = {"temperature": temperature} if loss_name != "triplet" else {"margin": 1.0}
     loss_fn = get_contrastive_loss(loss_name, **loss_kwargs)
 
-    tb_writer = SummaryWriter(log_dir=tb_dir)
+    tb_writer = SummaryWriter(log_dir=tb_dir) if SummaryWriter is not None else None
+    if tb_writer is None:
+        print("[pretrain] Warning: TensorBoard not installed. Install via: pip install tensorboard")
     encoder_dim = conv_out * 3  # 3 kernels
 
     # Pretraining now lets the encoder tokenize batched raw text directly.
@@ -634,7 +659,8 @@ def run_pretraining(
         )
         drug_loader = DataLoader(
             drug_ds, batch_size=batch_size, shuffle=True,
-            num_workers=0, pin_memory=True, drop_last=True,
+            num_workers=get_optimal_num_workers(), pin_memory=(device.type == "cuda"),
+            drop_last=True, persistent_workers=True,
         )
 
         drug_enc = DrugEncoder(
@@ -673,7 +699,8 @@ def run_pretraining(
         )
         prot_loader = DataLoader(
             prot_ds, batch_size=batch_size, shuffle=True,
-            num_workers=0, pin_memory=True, drop_last=True,
+            num_workers=get_optimal_num_workers(), pin_memory=(device.type == "cuda"),
+            drop_last=True, persistent_workers=True,
         )
 
         prot_enc = ProteinEncoder(
@@ -730,7 +757,8 @@ def run_pretraining(
         )
         cm_loader = DataLoader(
             cm_ds, batch_size=batch_size, shuffle=True,
-            num_workers=0, pin_memory=True, drop_last=True,
+            num_workers=get_optimal_num_workers(), pin_memory=(device.type == "cuda"),
+            drop_last=True, persistent_workers=True,
         )
 
         # Phase 4: Initialize encoders with optional pretrained models
@@ -790,7 +818,8 @@ def run_pretraining(
     with open(os.path.join(save_dir, "prot_vocab.json"), "w") as f:
         json.dump({"stoi": prot_stoi, "itos": prot_itos}, f)
 
-    tb_writer.close()
+    if tb_writer is not None:
+        tb_writer.close()
     print(f"\nPretraining complete. Checkpoints saved to {save_dir}")
     return results
 
