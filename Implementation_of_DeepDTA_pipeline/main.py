@@ -48,6 +48,7 @@ from .data_loading import prepare_data
 from .tokenizers_and_datasets import build_vocab, DtaDataset
 from .train import train_loop, eval_model
 from .utilities import set_seed, compute_all_metrics
+from .gpu_config import configure_gpu, get_optimal_num_workers, get_optimal_batch_size
 
 
 def build_model_from_args(args, vocab_drug: int, vocab_prot: int, device):
@@ -125,7 +126,7 @@ def main():
 
     # ── Training ──
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--batch", type=int, default=128)
+    parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--patience", type=int, default=8)
@@ -178,7 +179,12 @@ def main():
     # ── Setup ──
     set_seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
-    device = torch.device(args.device)
+
+    # Configure GPU for 80% utilization
+    if args.device == "cuda" and torch.cuda.is_available():
+        device = configure_gpu(memory_fraction=0.80)
+    else:
+        device = torch.device(args.device)
 
     tag = f"{args.model}_{args.split}_seed{args.seed}"
     print(f"\n{'='*60}")
@@ -218,14 +224,25 @@ def main():
     prot_stoi, prot_itos = build_vocab(train_df["sequence"].tolist())
     print(f"[main] Vocab: drug={len(sml_stoi)}, protein={len(prot_stoi)}")
 
-    # ── Datasets & loaders ──
+    # ── Datasets & loaders (GPU-optimized) ──
     train_ds = DtaDataset(train_df, sml_stoi, prot_stoi, args.max_sml_len, args.max_prot_len)
     val_ds = DtaDataset(val_df, sml_stoi, prot_stoi, args.max_sml_len, args.max_prot_len)
     test_ds = DtaDataset(test_df, sml_stoi, prot_stoi, args.max_sml_len, args.max_prot_len)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=args.batch, shuffle=False, num_workers=0, pin_memory=True)
+    # Optimized DataLoader settings for maximum GPU throughput
+    num_workers = get_optimal_num_workers()
+    use_persistent = num_workers > 0
+    loader_kwargs = dict(
+        pin_memory=(device.type == "cuda"),
+        num_workers=num_workers,
+        persistent_workers=use_persistent,
+        prefetch_factor=4 if num_workers > 0 else None,
+    )
+    print(f"[main] DataLoader: workers={num_workers}, pin_memory={device.type == 'cuda'}, prefetch=4")
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, drop_last=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=args.batch, shuffle=False, **loader_kwargs)
 
     # ── Model ──
     model = build_model_from_args(args, len(sml_stoi), len(prot_stoi), device)
