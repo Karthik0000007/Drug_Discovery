@@ -37,6 +37,7 @@ from .data_loading import prepare_data
 from .tokenizers_and_datasets import build_vocab, tokenize_seq, DtaDataset
 from .utilities import set_seed, compute_all_metrics
 from .train import train_loop, eval_model
+from .gpu_config import configure_gpu, get_optimal_num_workers
 
 
 # ──────────────────────────────────────────────
@@ -115,7 +116,11 @@ def run_single_experiment(
     print(f"{'='*60}")
 
     set_seed(seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Configure GPU for 80% utilization
+    if torch.cuda.is_available():
+        device = configure_gpu(memory_fraction=0.80)
+    else:
+        device = torch.device("cpu")
 
     # ── Load data ──
     csv_path = os.path.join(data_dir, f"{dataset_name}_processed.csv")
@@ -139,9 +144,18 @@ def run_single_experiment(
     val_ds = DtaDataset(val_df, drug_stoi, prot_stoi, max_drug, max_prot)
     test_ds = DtaDataset(test_df, drug_stoi, prot_stoi, max_drug, max_prot)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    # Optimized DataLoader settings
+    num_workers = get_optimal_num_workers()
+    use_persistent = num_workers > 0
+    loader_kwargs = dict(
+        pin_memory=(device.type == "cuda"),
+        num_workers=num_workers,
+        persistent_workers=use_persistent,
+    )
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, **loader_kwargs)
 
     # ── Build model ──
     model = build_model(
@@ -328,6 +342,132 @@ def _print_summary_table(results: List[Dict]):
 
 
 # ──────────────────────────────────────────────
+# Phase 11: Statistical Analysis Integration
+# ──────────────────────────────────────────────
+
+def analyze_results(output_dir: str, baseline: str = "DeepDTA") -> None:
+    """
+    Run statistical analysis on experiment results.
+
+    Compares all models against a baseline using paired t-tests,
+    generates leaderboard tables, and exports LaTeX.
+    """
+    try:
+        from .ablation_runner import ResultAggregator
+        from .statistical_analysis import compare_models, bonferroni_correction
+    except ImportError:
+        print("[run] Statistical analysis modules not found. Skipping.")
+        return
+
+    agg = ResultAggregator()
+    json_dir = os.path.join(output_dir, "json")
+    if os.path.exists(json_dir):
+        agg.load_from_dir(json_dir)
+
+    if not agg.results:
+        print("[run] No results found for analysis.")
+        return
+
+    # Generate leaderboard
+    print(f"\n{'='*60}")
+    print("[run] LEADERBOARD")
+    print(f"{'='*60}")
+    df = agg.aggregate()
+    if not df.empty:
+        md = agg.to_markdown(df)
+        print(md)
+
+        # Save tables
+        tables_dir = os.path.join(output_dir, "tables")
+        os.makedirs(tables_dir, exist_ok=True)
+
+        md_path = os.path.join(tables_dir, "leaderboard.md")
+        with open(md_path, "w") as f:
+            f.write(md)
+        print(f"[run] Markdown table saved to {md_path}")
+
+        latex = agg.to_latex(df)
+        latex_path = os.path.join(tables_dir, "leaderboard.tex")
+        with open(latex_path, "w") as f:
+            f.write(latex)
+        print(f"[run] LaTeX table saved to {latex_path}")
+
+    # Statistical comparisons against baseline
+    from collections import defaultdict
+    valid = [r for r in agg.results if "metrics" in r and not r.get("error")]
+    if not valid:
+        return
+
+    model_scores = defaultdict(lambda: defaultdict(list))
+    for r in valid:
+        model = r.get("model", "unknown")
+        for metric_name, val in r["metrics"].items():
+            model_scores[model][metric_name].append(val)
+
+    baseline_data = model_scores.get(baseline, {})
+    if not baseline_data:
+        print(f"[run] Baseline '{baseline}' not found in results.")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"[run] STATISTICAL COMPARISONS vs {baseline}")
+    print(f"{'='*60}")
+
+    for model_name, scores in sorted(model_scores.items()):
+        if model_name == baseline:
+            continue
+        for metric in ["ci", "rmse"]:
+            if metric in scores and metric in baseline_data:
+                a = scores[metric]
+                b = baseline_data[metric]
+                # Only compare if same number of runs
+                n = min(len(a), len(b))
+                if n < 2:
+                    continue
+                result = compare_models(
+                    a[:n], b[:n],
+                    model_a_name=model_name,
+                    model_b_name=baseline,
+                    metric_name=metric.upper(),
+                )
+                print(f"\n  {model_name} vs {baseline} ({metric.upper()}):")
+                print(f"    {model_name}: {np.mean(a[:n]):.4f}±{np.std(a[:n]):.4f}")
+                print(f"    {baseline}: {np.mean(b[:n]):.4f}±{np.std(b[:n]):.4f}")
+                print(f"    p-value: {result['paired_ttest']['p_value']:.4f}")
+                print(f"    Effect: {result['effect_size']} (d={result['cohens_d']:.3f})")
+                print(f"    → {result['conclusion']}")
+
+
+# ──────────────────────────────────────────────
+# Phase 11: Ablation Runner Integration
+# ──────────────────────────────────────────────
+
+def run_ablations(
+    data_path: str,
+    output_dir: str = "results/ablations",
+    seeds: List[int] = None,
+) -> None:
+    """
+    Run standard ablation studies from the CL-DTA paper.
+    """
+    try:
+        from .ablation_runner import AblationRunner, setup_standard_ablations
+        from .config import ExperimentConfig
+    except ImportError:
+        print("[run] Ablation runner not found. Skipping.")
+        return
+
+    seeds = seeds or [42, 123, 456]
+    base_config = ExperimentConfig()
+    runner = AblationRunner(base_config, output_dir=output_dir, seeds=seeds)
+    setup_standard_ablations(runner)
+
+    print(f"[run] Ablation studies registered: {list(runner.ablations.keys())}")
+    print(f"[run] To execute, call runner.run_all(run_fn=your_training_function)")
+    print(f"[run] Output directory: {output_dir}")
+
+
+# ──────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────
 
@@ -348,8 +488,33 @@ def main():
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-4)
+
+    # Phase 11: new flags
+    parser.add_argument("--analyze", action="store_true",
+                        help="Run statistical analysis on existing results")
+    parser.add_argument("--baseline", type=str, default="DeepDTA",
+                        help="Baseline model for statistical comparisons")
+    parser.add_argument("--ablation", action="store_true",
+                        help="Set up and display ablation configurations")
+
     args = parser.parse_args()
 
+    # Phase 11: Analysis mode
+    if args.analyze:
+        analyze_results(args.output_dir, baseline=args.baseline)
+        return
+
+    # Phase 11: Ablation mode
+    if args.ablation:
+        ablation_dir = os.path.join(args.output_dir, "ablations")
+        run_ablations(
+            data_path=args.data_dir,
+            output_dir=ablation_dir,
+            seeds=args.seeds,
+        )
+        return
+
+    # Standard experiment matrix
     run_all_experiments(
         datasets=args.datasets,
         splits=args.splits,
@@ -365,6 +530,10 @@ def main():
         lr=args.lr,
     )
 
+    # Auto-analyze after experiments complete
+    analyze_results(args.output_dir, baseline=args.baseline)
+
 
 if __name__ == "__main__":
     main()
+
