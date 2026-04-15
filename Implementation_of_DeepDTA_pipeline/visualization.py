@@ -388,6 +388,8 @@ def plot_attention_heatmap(
     title: str = "Attention Weights per Residue",
     save_path: Optional[str] = None,
     max_residues: int = 100,
+    show_sequence_chars: bool = False,
+    x_tick_step: Optional[int] = None,
 ) -> plt.Figure:
     """
     Plot attention heatmap over protein residue positions.
@@ -409,20 +411,39 @@ def plot_attention_heatmap(
     L = min(attn_weights.shape[-1], max_residues)
     attn_weights = attn_weights[:, :L]
 
-    fig, ax = plt.subplots(figsize=(max(8, L * 0.12), max(3, attn_weights.shape[0] * 0.5)))
+    fig_width = max(12, L * 0.22)
+    fig_height = max(4.5, attn_weights.shape[0] * 1.1)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     im = ax.imshow(attn_weights, cmap="viridis", aspect="auto")
 
     ax.set_xlabel("Protein Residue Position")
     ax.set_ylabel("Attention Head")
     ax.set_title(title)
-    fig.colorbar(im, ax=ax, shrink=0.8, label="Attention Weight")
+    cbar = fig.colorbar(im, ax=ax, shrink=0.82, pad=0.03, label="Attention Weight")
+    cbar.ax.tick_params(labelsize=13)
 
-    if sequence and L <= 80:
-        ax.set_xticks(range(L))
-        ax.set_xticklabels(list(sequence[:L]), fontsize=12)
+    if x_tick_step is None:
+        if L <= 25:
+            x_tick_step = 1
+        elif L <= 50:
+            x_tick_step = 5
+        else:
+            x_tick_step = 10
+
+    tick_positions = np.arange(0, L, x_tick_step)
+    if len(tick_positions) == 0 or tick_positions[-1] != L - 1:
+        tick_positions = np.append(tick_positions, L - 1)
+    ax.set_xticks(tick_positions)
+
+    if sequence and show_sequence_chars and L <= 30:
+        tick_labels = [sequence[pos] for pos in tick_positions]
+    else:
+        tick_labels = [str(pos + 1) for pos in tick_positions]
+    ax.set_xticklabels(tick_labels, rotation=0, fontsize=12)
 
     ax.set_yticks(range(attn_weights.shape[0]))
     ax.set_yticklabels([f"Head {i}" for i in range(attn_weights.shape[0])], fontsize=14)
+    ax.tick_params(axis="x", pad=8)
 
     plt.tight_layout()
     if save_path:
@@ -569,6 +590,174 @@ def plot_embedding_comparison(
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         fig.savefig(save_path)
         print(f"[viz] Saved embedding comparison to {save_path}")
+    return fig
+
+
+# ──────────────────────────────────────────────
+# Phase 8: Mutual Information Computation
+# ──────────────────────────────────────────────
+
+def compute_mutual_information(
+    drug_embeddings: np.ndarray,
+    prot_embeddings: np.ndarray,
+    n_bins: int = 20,
+) -> float:
+    """
+    Compute mutual information between drug and protein embeddings.
+    
+    Uses histogram-based estimation with discretization.
+    
+    Parameters
+    ----------
+    drug_embeddings : (N, D_drug) array
+    prot_embeddings : (N, D_prot) array
+    n_bins : int
+        Number of bins for discretization
+    
+    Returns
+    -------
+    mi : float
+        Average mutual information across dimension pairs
+    """
+    from sklearn.metrics import mutual_info_score
+    
+    # Discretize embeddings
+    drug_discrete = np.zeros_like(drug_embeddings, dtype=int)
+    prot_discrete = np.zeros_like(prot_embeddings, dtype=int)
+    
+    for d in range(drug_embeddings.shape[1]):
+        drug_discrete[:, d] = np.digitize(
+            drug_embeddings[:, d],
+            bins=np.linspace(drug_embeddings[:, d].min(), drug_embeddings[:, d].max(), n_bins)
+        )
+    
+    for p in range(prot_embeddings.shape[1]):
+        prot_discrete[:, p] = np.digitize(
+            prot_embeddings[:, p],
+            bins=np.linspace(prot_embeddings[:, p].min(), prot_embeddings[:, p].max(), n_bins)
+        )
+    
+    # Compute MI for each dimension pair and average
+    mi_scores = []
+    for d in range(min(drug_embeddings.shape[1], 10)):  # Sample first 10 dims for efficiency
+        for p in range(min(prot_embeddings.shape[1], 10)):
+            mi = mutual_info_score(drug_discrete[:, d], prot_discrete[:, p])
+            mi_scores.append(mi)
+    
+    return float(np.mean(mi_scores))
+
+
+def plot_mi_evolution(
+    mi_scores: List[float],
+    epochs: Optional[List[int]] = None,
+    title: str = "Mutual Information Evolution",
+    save_path: Optional[str] = None,
+) -> plt.Figure:
+    """
+    Plot mutual information evolution during training.
+    
+    Parameters
+    ----------
+    mi_scores : list of MI values at different checkpoints
+    epochs : list of epoch numbers (optional)
+    """
+    apply_style()
+    
+    if epochs is None:
+        epochs = list(range(1, len(mi_scores) + 1))
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(epochs, mi_scores, marker='o', linewidth=2, markersize=6, color='#e74c3c')
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Mutual Information (bits)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    
+    # Annotate first and last
+    if len(mi_scores) > 0:
+        ax.annotate(f'{mi_scores[0]:.3f}', xy=(epochs[0], mi_scores[0]),
+                   xytext=(10, 10), textcoords='offset points',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax.annotate(f'{mi_scores[-1]:.3f}', xy=(epochs[-1], mi_scores[-1]),
+                   xytext=(10, -20), textcoords='offset points',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path)
+        print(f"[viz] Saved MI evolution plot to {save_path}")
+    return fig
+
+
+# ──────────────────────────────────────────────
+# Phase 8: Multi-Head Attention Comparison
+# ──────────────────────────────────────────────
+
+def plot_multihead_attention_comparison(
+    attention_weights: np.ndarray,
+    sequence: Optional[str] = None,
+    pocket_mask: Optional[np.ndarray] = None,
+    title: str = "Multi-Head Attention Analysis",
+    save_path: Optional[str] = None,
+    max_residues: int = 100,
+) -> plt.Figure:
+    """
+    Compare attention patterns across multiple heads with pocket highlighting.
+    
+    Parameters
+    ----------
+    attention_weights : (num_heads, seq_len) array
+    sequence : str, optional protein sequence
+    pocket_mask : (seq_len,) binary mask for pocket residues
+    """
+    apply_style()
+    
+    num_heads = attention_weights.shape[0]
+    L = min(attention_weights.shape[1], max_residues)
+    attention_weights = attention_weights[:, :L]
+    
+    if pocket_mask is not None:
+        pocket_mask = pocket_mask[:L]
+    
+    fig, axes = plt.subplots(num_heads, 1, figsize=(14, 3 * num_heads))
+    if num_heads == 1:
+        axes = [axes]
+    
+    for head_idx, ax in enumerate(axes):
+        weights = attention_weights[head_idx]
+        positions = np.arange(L)
+        
+        # Color by pocket/non-pocket
+        if pocket_mask is not None:
+            pocket_positions = positions[pocket_mask == 1]
+            non_pocket_positions = positions[pocket_mask == 0]
+            
+            ax.bar(pocket_positions, weights[pocket_mask == 1],
+                  color='#e74c3c', alpha=0.7, label='Pocket')
+            ax.bar(non_pocket_positions, weights[pocket_mask == 0],
+                  color='#3498db', alpha=0.7, label='Non-pocket')
+            ax.legend(loc='upper right')
+        else:
+            ax.bar(positions, weights, color='#3498db', alpha=0.7)
+        
+        ax.set_ylabel(f'Head {head_idx}')
+        ax.set_ylim(0, weights.max() * 1.1)
+        ax.grid(axis='y', alpha=0.3)
+        
+        # Compute entropy
+        entropy = -np.sum(weights * np.log(weights + 1e-10))
+        ax.text(0.98, 0.95, f'Entropy: {entropy:.3f}',
+               transform=ax.transAxes, ha='right', va='top',
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    axes[-1].set_xlabel('Protein Residue Position')
+    fig.suptitle(title, fontsize=16, y=1.00)
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path)
+        print(f"[viz] Saved multi-head attention comparison to {save_path}")
     return fig
 
 
