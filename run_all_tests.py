@@ -46,9 +46,9 @@ def main():
     print("\nTesting all implemented phases...")
     
     tests = [
-        ("test_phase6_attention.py", "Phase 6: Pocket-Guided Attention"),
-        ("test_phase7_uncertainty.py", "Phase 7: Evidential Uncertainty"),
-        ("test_phase9_multitask.py", "Phase 9: Multi-Task Learning"),
+        ("test_attention_module.py", "Phase 6: Pocket-Guided Attention"),
+        ("test_uncertainty_estimation.py", "Phase 7: Evidential Uncertainty"),
+        ("test_multitask_learning.py", "Phase 9: Multi-Task Learning"),
     ]
     
     results = {}
